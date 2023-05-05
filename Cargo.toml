@@ -1,0 +1,6 @@
+[package]
+name = "yadb"
+version = "0.0.1"
+
+[dependencies]
+rocksdb = "0.20.1"
