@@ -1,5 +1,6 @@
+extern crate rocksdb;
 use rocksdb::{DB, Options};
-use std::io::{Read, Write};
+use std::io::{Read, Write, Error as IoError};
 use std::net::{TcpListener, TcpStream};
 
 fn handle_client(mut stream: TcpStream, db: &DB) {
@@ -54,11 +55,11 @@ fn process_command(command: &[String], db: &DB) -> String {
                 None => "Key not found\n".to_string(),
             }
         }
-        // Some("delete") if command.len() == 2 => {
-        //     let key = command[1].as_bytes();
-        //     db.delete(key).unwrap();
-        //     "Success\n".to_string()
-        // }
+        Some("delete") if command.len() == 2 => {
+            let key = command[1].as_bytes();
+            db.delete(key).unwrap();
+            "Success\n".to_string()
+        }
         _ => "Invalid command\n".to_string(),
     }
 }
@@ -66,9 +67,6 @@ fn process_command(command: &[String], db: &DB) -> String {
 fn send_response(stream: &mut TcpStream, response: &str) -> Result<(), IoError> {
     stream.write_all(response.as_bytes())
 }
-
-
-
 
 fn main() {
     let path = "yadb";

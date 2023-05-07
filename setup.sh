@@ -9,6 +9,4 @@ sudo apt install build-essential
 sudo apt install -y clang
 sudo apt-get install libclang-dev
 rustup toolchain install nightly
-cargo +nightly install -Z sparse-registry --debug cargo-ament-build 
-cargo build
-cargo run
+cargo +nightly install -Z sparse-registry --debug cargo-ament-build
