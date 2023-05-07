@@ -1,3 +1,5 @@
+
+extern crate rocksdb;
 use rocksdb::{DB, Options};
 
 fn main() {
@@ -11,7 +13,7 @@ fn main() {
     
     match db.get(b"key") {
         Ok(Some(value)) => {
-            let value_str = String::from_utf8(value).unwrap();
+            let value_str = String::from_utf8(value.to_vec()).unwrap();
             println!("Stored value: {}", value_str);
         }
         Ok(None) => println!("No value found for the given key."),
