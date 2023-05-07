@@ -1,7 +1,15 @@
+// do i actually need these extern crates?
 extern crate rocksdb;
-use rocksdb::{DB, Options};
+extern crate log;
+extern crate simplelog;
+
+use rocksdb::{DB};
+use log::{info, warn, LevelFilter};
+use simplelog::{CombinedLogger, Config, TermLogger, TerminalMode, WriteLogger};
+
 use std::io::{Read, Write, Error as IoError};
 use std::net::{TcpListener, TcpStream};
+use std::fs::OpenOptions;
 
 fn handle_client(mut stream: TcpStream, db: &DB) {
     loop {
@@ -10,17 +18,13 @@ fn handle_client(mut stream: TcpStream, db: &DB) {
                 if command.is_empty() {
                     continue;
                 }
-                // if process_command (the database) fails
-                // just fail
-                // figure out a better solution later
                 let response = process_command(&command, db);
                 if let Err(e) = send_response(&mut stream, &response) {
-                    eprintln!("Network: Request: {}", e);
+                    warn!("Network: Request: {}", e);
                 }
             }
             Err(e) => {
-                // eprintln!("Network: Other network error: {} {}", e.kind(), e);
-                eprintln!("Network: Response: {}", e);
+                warn!("Network: Response: {}", e);
                 break;
             }
         }
@@ -29,10 +33,7 @@ fn handle_client(mut stream: TcpStream, db: &DB) {
 
 fn read_client_command(stream: &mut TcpStream) -> Result<Vec<String>, IoError> {
     let mut buffer = [0; 1024];
-    // propogate err the rustonic way
     let bytes_read = stream.read(&mut buffer)?;
-    // convert invalid utf8 chars to unknown chars
-    // need to figure out why i need to_owned for this to compile
     let command: Vec<String> = String::from_utf8_lossy(&buffer[..bytes_read])
         .split_whitespace()
         .map(|s| s.to_owned())
@@ -68,12 +69,28 @@ fn send_response(stream: &mut TcpStream, response: &str) -> Result<(), IoError> 
     stream.write_all(response.as_bytes())
 }
 
-fn main() {
+fn main() -> Result<(), Error> {
+    let log_file = OpenOptions::new()
+        .write(true)
+        .append(true)
+        .create(true)
+        .open("logs/log")?;
+    let write_logger = WriteLogger::new(LevelFilter::Info, Config::default(), log_file);
+    let term_logger = TermLogger::new(LevelFilter::Info, Config::default(), TerminalMode::Mixed);
+
+    if let Some(term_logger) = term_logger {
+        let combined_logger = CombinedLogger::new(vec![Box::new(write_logger), Box::new(term_logger)]);
+        combined_logger.init()?;
+    } else {
+        eprintln!("Failed to create TermLogger, logs will only be written to the log file");
+        write_logger.init()?;
+    }
+
     let path = "yadb";
     let db = DB::open_default(path).unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:8000").unwrap();
-    println!("server up");
+    info!("server up");
 
     for stream in listener.incoming() {
         let stream = stream.unwrap();
