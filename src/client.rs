@@ -5,7 +5,6 @@ fn main() {
     let mut stream = TcpStream::connect("127.0.0.1:8000").unwrap();
     let mut buffer = [0; 1024];
 
-
     loop {
         let mut command = String::new();
         io::stdin().read_line(&mut command).unwrap();

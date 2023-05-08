@@ -1,30 +1,54 @@
-// do i actually need these extern crates?
-extern crate rocksdb;
 extern crate log;
 extern crate simplelog;
+extern crate sled;
 
-use rocksdb::{DB};
 use log::{info, warn, LevelFilter};
-use simplelog::{CombinedLogger, Config, TermLogger, TerminalMode, WriteLogger};
+use simplelog::{ColorChoice, CombinedLogger, Config, TermLogger, TerminalMode, WriteLogger};
+use sled::Tree;
 
-use std::io::{Read, Write, Error as IoError};
+use std::fs::File;
+use std::io::{Error as IoError, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::fs::OpenOptions;
+use std::path::Path;
 
-fn handle_client(mut stream: TcpStream, db: &DB) {
+struct Storage {
+    tree: Tree,
+}
+
+impl Storage {
+    fn new(tree: Tree) -> Self {
+        Storage { tree }
+    }
+
+    fn put(&self, key: &[u8], value: &[u8]) -> sled::Result<()> {
+        self.tree.insert(key, value)?;
+        Ok(())
+    }
+
+    fn get(&self, key: &[u8]) -> sled::Result<Option<sled::IVec>> {
+        self.tree.get(key)
+    }
+
+    fn delete(&self, key: &[u8]) -> sled::Result<()> {
+        self.tree.remove(key)?;
+        Ok(())
+    }
+}
+
+fn handle_client(mut stream: TcpStream, storage: &Storage) {
     loop {
         match read_client_command(&mut stream) {
             Ok(command) => {
                 if command.is_empty() {
                     continue;
                 }
-                let response = process_command(&command, db);
+                let response = process_command(&command, storage);
                 if let Err(e) = send_response(&mut stream, &response) {
-                    warn!("Network: Request: {}", e);
+                    warn!("Network: Response: {}", e);
                 }
             }
             Err(e) => {
-                warn!("Network: Response: {}", e);
+                warn!("Network: Request: {}", e);
                 break;
             }
         }
@@ -41,24 +65,24 @@ fn read_client_command(stream: &mut TcpStream) -> Result<Vec<String>, IoError> {
     Ok(command)
 }
 
-fn process_command(command: &[String], db: &DB) -> String {
+fn process_command(command: &[String], storage: &Storage) -> String {
     match command.get(0).map(String::as_str) {
         Some("put") if command.len() == 3 => {
             let key = command[1].as_bytes();
             let value = command[2].as_bytes();
-            db.put(key, value).unwrap();
+            storage.put(key, value).unwrap();
             "Success\n".to_string()
         }
         Some("get") if command.len() == 2 => {
             let key = command[1].as_bytes();
-            match db.get(key).unwrap() {
+            match storage.get(key).unwrap() {
                 Some(value) => String::from_utf8(value.to_vec()).unwrap() + "\n",
                 None => "Key not found\n".to_string(),
             }
         }
         Some("delete") if command.len() == 2 => {
             let key = command[1].as_bytes();
-            db.delete(key).unwrap();
+            storage.delete(key).unwrap();
             "Success\n".to_string()
         }
         _ => "Invalid command\n".to_string(),
@@ -69,32 +93,34 @@ fn send_response(stream: &mut TcpStream, response: &str) -> Result<(), IoError> 
     stream.write_all(response.as_bytes())
 }
 
-fn main() -> Result<(), Error> {
-    let log_file = OpenOptions::new()
-        .write(true)
-        .append(true)
-        .create(true)
-        .open("logs/log")?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let log_path = Path::new("./logs/log");
+    let log_file = File::create(log_path).expect("Failed to create log file");
+
+    let term_logger = TermLogger::new(
+        LevelFilter::Warn,
+        Config::default(),
+        TerminalMode::Mixed,
+        ColorChoice::Auto,
+    );
+
     let write_logger = WriteLogger::new(LevelFilter::Info, Config::default(), log_file);
-    let term_logger = TermLogger::new(LevelFilter::Info, Config::default(), TerminalMode::Mixed);
 
-    if let Some(term_logger) = term_logger {
-        let combined_logger = CombinedLogger::new(vec![Box::new(write_logger), Box::new(term_logger)]);
-        combined_logger.init()?;
-    } else {
-        eprintln!("Failed to create TermLogger, logs will only be written to the log file");
-        write_logger.init()?;
-    }
+    CombinedLogger::init(vec![term_logger, write_logger])
+        .expect("Failed to initialize combined logger");
 
-    let path = "yadb";
-    let db = DB::open_default(path).unwrap();
+    let db = sled::open("yadb").unwrap();
+    let tree = db.open_tree("default").unwrap();
+    let storage = Storage::new(tree);
 
     let listener = TcpListener::bind("127.0.0.1:8000").unwrap();
     info!("server up");
 
     for stream in listener.incoming() {
         let stream = stream.unwrap();
-        println!("client at: {}", stream.peer_addr().unwrap());
-        handle_client(stream, &db);
+        info!("client at: {}", stream.peer_addr().unwrap());
+        handle_client(stream, &storage);
     }
+
+    Ok(())
 }
