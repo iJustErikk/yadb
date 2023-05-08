@@ -1,11 +1,11 @@
 # YAdb
 yet another database
 
-going to make a database. starting with rocksdb as storage engine and I'll pile other features in after.
+making a db. started with rocksdb and switched to sled due to build issues.
 
 next up:
 
-- make this more usable
+- make this more usable (maybe sql api)
 - concurrency support
 - replication support
 - more? maybe spin up YAstorageengine
