@@ -8,7 +8,7 @@ this is based on LSM trees. going to use the standard optimizations like bloom f
 need to look into other optimizations rocksdb uses. I'd like to build something like cockroach db. i really need to dig into things more. I need to review how storage engine design affects r/w/s amplification, see if I should implement multi-level lsm, check out different compaction strategies...
 
 next up:
-- implement storage engine (see other project) so I could keep using the same K/V tcp interface
+- implement storage engine so I could keep using the same K/V tcp interface
 - make this more usable (tables, client library, sql support/indices)
 - concurrency support
 - replication support
