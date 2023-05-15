@@ -1,0 +1,17 @@
+[package]
+name = "yadb"
+version = "0.0.1"
+autobins = false
+
+[[bin]]
+name = "server"
+path = "src/main.rs"
+
+[[bin]]
+name = "client"
+path = "src/client.rs"
+
+[dependencies]
+log = "0.4.17"
+simplelog = "0.12.1"
+sled = "0.34.7"
