@@ -1,6 +1,52 @@
 // lsm based storage engine
 // level compaction whenever level hits 10 sstables
 
+// wait: I need to figure out byte ordering
+// little or big endian?
+
+struct Tree {
+    // let's start with 5 levels
+    // this is a lot of space
+    tables_per_level: [i32; 5],
+}
+// BoB are preceded by 4 bytes signifying length
+struct IndexEntry {
+    // key: BoB,
+    // key_len: i32
+    offset: i64,
+    length: i64
+}
+
+struct SSTable {
+    // meta (offsets, lengths for bloom filter, index, data)
+    // bloom filter
+    index: Vec<IndexEntry>,
+    data: Vec<byte>
+}
+
+struct WALEntry {
+    // operation (get put delete) how do I do enums?
+    // keylen: i32
+    // key: BoB,
+    // value_len: i32
+    value: 
+    // value (for put)
+}
+
+// in memory only
+struct Memtable {
+    // skiplist
+    // size counter
+}
+
+// init: user will specify a folder
+// if empty, init
+// if does not have all files, exit
+// otherwise init from those, if header disagrees with file state, cleanup the uncommitted files (could be from a failed flush or compaction)
+// run the WAL log
+// that folder will contain a header file, a WAL file named wal and folders 0, 1, 2, 3... containing corresponing levels of sstables
+// those folders will contain files named 0, 1, 2, 3... containing sstables of increasing recency
+
 // read:
 // search sstable first
 // lower levels are newer than older levels. so start reading from the bottom most level and work upwards if key not found
@@ -14,7 +60,7 @@
 // write:
 // write to memtable until it is large enough to flush (1mb?)
 // memtable should be sorted and have unique keys before writing as sstable
-// what ds to use?
+// use skiplist for memtable
 // operations:
 // add/update/delete key
 // read key
