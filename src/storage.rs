@@ -9,6 +9,9 @@ use std::error::Error;
 use std::io::Write;
 use std::io::Read;
 use std::fmt;
+
+extern crate crossbeam_skiplist;
+use crossbeam_skiplist::SkipMap;
 // metrics:
 // - wal replays
 // - wal replay total bytes
@@ -60,6 +63,7 @@ struct Tree {
     // this is a lot of space 111110 mb ~ 108.5 gb
     tables_per_level: Option<[u8; 5]>,
     path: PathBuf
+    memtable: Memtable
 }
 
 // BoB are preceded by 4 bytes signifying length
@@ -88,11 +92,13 @@ struct WALEntry {
 }
 
 // in memory only, serialize to sstable
+// use skipmap/skiplist, as it could be made wait-free and it's faster than in memory b tree (and moreso when accounting for lock contentions)
+// although I am sure a wait-free tree does exist, skiplists are much simpler
+// this skiplist may or may not be wait-free...still need to look into it (maybe code my own)
 struct Memtable {
+    skipmap: SkipMap<String, Vec<u8>>
+    size: u64
     // skiplist
-    // look into this: skiplist can be made lock-free or wait-free (i have no idea what these mean, look into that as well)
-    // need to optimize lock contention, batch io and make sure anything cpu bound is fast
-    // need to make benchmarks (could steal pebble's or rocksdbs) so I can say something cool like: there are lies, damned lies and benchmarks
     // size counter
 }
 
@@ -105,7 +111,7 @@ struct Memtable {
 // those folders will contain files named 0, 1, 2, 3... containing sstables of increasing recency
 impl Tree {
     pub fn new(path: PathBuf) -> Self{
-        return Tree {tables_per_level: None, path}
+        return Tree {tables_per_level: None, path, Memtable{skipmap: SkipMap::new(), size: 0}}
     }
     pub fn init(&mut self) -> Result<(), Box<dyn Error>> {
         self.init_folder()?;
@@ -216,6 +222,48 @@ impl Tree {
         }
         Ok(())
     }
+    pub fn get(&self, key: Vec<u8>) <{
+        if self.memtable.skipmap.contains_key(key) {
+            return self.memtable.skipmap[key];
+        }
+        // search the fs
+        // iterate over sstables
+        // no bloom filter yet
+        // are we sure the bloom filter brings any speed?
+        // bloom filter can be fit into 1 io
+        // how can we avoid loading full keyspace in when searching?
+    }
+    fn flush_memtable() {
+        // we add memtable as a new sstable
+        // walk compactions up as needed
+    }
+
+    fn append_to_wal(operation) {
+        // are we sure this is atomic?
+        // if not, how can we make it so?
+        // simply append to wal
+    }
+
+    fn add_operation(operation) {
+        let old_size = self.memtable.skipmap.contains_key(key) ? self.memtable.skipmap[key].size : 0;
+        let new_size = value.size;
+        self.size += (new_size - old_size);
+        self.memtable.skipmap[key] = value;
+        append_to_wal(operation);
+        if self.size > 1_000_000 {
+            flush_memtable();
+        }
+    }
+
+    // not sure if Vec is hashable...hopefully
+
+    pub fn put(&self, key: Vec<u8>, value: Vec<u8>) {
+        add_operation(WALEntry{operation: Operation::PUT, key, value});
+    }
+
+    pub fn delete(&self, key: Vec<u8>) {
+        add_operation(WALEntry{operation: Operation::DELETE, key, value});
+    }
 }
 // read:
 // search memtable first
@@ -230,12 +278,6 @@ impl Tree {
 // write:
 // write to memtable until it is large enough to flush (1mb?)
 // memtable should be sorted and have unique keys before writing as sstable
-// use skiplist for memtable
-// operations:
-// add/update/delete key
-// read key
-// preferably O(log(n))
-// compress value immediately
 
 // compaction:
 // come back to this
