@@ -11,6 +11,10 @@ path = "src/main.rs"
 name = "client"
 path = "src/client.rs"
 
+[[bin]]
+name = "storage"
+path = "src/storage.rs"
+
 [dependencies]
 log = "0.4.17"
 simplelog = "0.12.1"

@@ -1,6 +1,14 @@
 // lsm based storage engine
 // level compaction whenever level hits 10 sstables
+use std::fs;
+use fs::File;
+use fs::remove_file;
+use std::path::PathBuf;
+use std::error::Error;
 
+use std::io::Write;
+use std::io::Read;
+use std::fmt;
 // metrics:
 // - wal replays
 // - wal replay total bytes
@@ -11,6 +19,7 @@
 // look into: retry mechanism for failed fs calls
 // TODO: go through with checklist to make sure the database can fail at any point during wal replay, compaction or memtable flush
 // TODO: sometime later, create tests that mock fs state, test failures
+// TODO: handle unwraps
 
 // byte ordering: rust uses whatever the user's machine is
 // as this is an embedded database, they are probably going with whatever their machine uses and there is no reason to let them choose
@@ -27,8 +36,8 @@ enum InvalidDatabaseStateError {
     CorruptedHeader,
     UnexpectedUserFolder { folderpath: String },
     UnexpectedUserFile { filepath: String },
-    LevelTooLarge { level: i8 },
-    SSTableMismatch { expected: Vec, real: Vec },
+    LevelTooLarge { level: u8 },
+    SSTableMismatch { expected: Vec<u8>, actual: Vec<u8> },
 }
 
 impl fmt::Display for InvalidDatabaseStateError {
@@ -39,7 +48,7 @@ impl fmt::Display for InvalidDatabaseStateError {
             InvalidDatabaseStateError::UnexpectedUserFolder { ref folderpath } => write!(f, "Unexpected user folder: {}", folderpath),
             InvalidDatabaseStateError::UnexpectedUserFile { ref filepath } => write!(f, "Unexpected user file: {}", filepath),
             InvalidDatabaseStateError::LevelTooLarge { ref level } => write!(f, "Level too large: {}", level),
-            InvalidDatabaseStateError::SSTableMismatch { ref expected, ref real } => write!(f, "SSTable mismatch: expected {:?}, got {:?}", expected, real),
+            InvalidDatabaseStateError::SSTableMismatch { ref expected, ref actual } => write!(f, "SSTable mismatch: expected {:?}, got {:?}", expected, actual),
         }
     }
 }
@@ -49,13 +58,13 @@ impl Error for InvalidDatabaseStateError {}
 struct Tree {
     // let's start with 5 levels
     // this is a lot of space 111110 mb ~ 108.5 gb
-    tables_per_level: Option<[i8; 5]>,
-    folder: Path
+    tables_per_level: Option<[u8; 5]>,
+    path: PathBuf
 }
 
 // BoB are preceded by 4 bytes signifying length
 struct IndexEntry {
-    key: Vec<u8>
+    key: Vec<u8>,
     offset: i64,
     length: i64
 }
@@ -64,7 +73,7 @@ struct SSTable {
     // meta (offsets, lengths for bloom filter, index, data)
     // bloom filter
     index: Vec<IndexEntry>,
-    data: Vec<byte>
+    data: Vec<u8>
 }
 
 // could provide more ops in future, like the merge operator in pebble/rocksdb
@@ -95,112 +104,117 @@ struct Memtable {
 // that folder will contain a header file, a WAL file named wal and folders 0, 1, 2, 3... containing corresponing levels of sstables
 // those folders will contain files named 0, 1, 2, 3... containing sstables of increasing recency
 impl Tree {
-    pub fn new(&self, PathBuf path) -> self{
-        return Tree {None, path}
+    pub fn new(path: PathBuf) -> Self{
+        return Tree {tables_per_level: None, path}
     }
-    pub fn Init(&self) -> Result<(), Box<dyn Error>> {
-        self.initFolder();
-        self.cleanupUncommitted();
-        self.generalSanityCheck();
+    pub fn init(&mut self) -> Result<(), Box<dyn Error>> {
+        self.init_folder()?;
+        self.cleanup_uncommitted()?;
+        self.general_sanity_check()?;
         // self.tryRestoreWAL();
-        Ok(());
+        Ok(())
     }
-    fn initFolder(&self) -> Result<(), Box<dyn Error>> {
+    fn init_folder(&mut self) -> Result<(), Box<dyn Error>> {
         // TODO:
         // right now we just pass the error up to the user
         // we should probably send them a custom error with steps to fix
-        if !path.exists() {
-            fs::create_dir_all(path)?;
-            let mut buffer = [0; 5];
-            self.tables_per_level = buffer
-            let mut header = File::create(path.clone().join("header"))?;
+        if !self.path.exists() {
+            fs::create_dir_all(&self.path)?;
+            let buffer = [0; 5];
+            self.tables_per_level = Some(buffer);
+            let mut header = File::create(self.path.clone().join("header"))?;
             header.write_all(&buffer)?;
-            File::create(path.clone().join("wal"))?;
+            File::create(self.path.clone().join("wal"))?;
             
         } else {
             let mut buffer = [0; 5];
             // if this fails, alert the user with InvalidDatabaseStateError, missing header
-            let mut file = File::open(path.clone().join("header"))?;
+            let mut file = File::open(self.path.clone().join("header"))?;
             // if this fails, alert the user with InvalidDatabaseStateError, corrupted header
             file.read_exact(&mut buffer)?;
-            self.tables_per_level = discoveredTabels
+            self.tables_per_level = Some(buffer);
         }
-        Ok(());
+        Ok(())
     }
     // TODO: custom error and help steps as above
     // failure may happen in startup (wal replay), compaction or memtable flush
     // cleanup after failure
-    fn cleanupUncommitted(&self) -> Result<(), Box<dyn Error>>  {
-        for entry_result in fs::read_dir(path)? {
+    fn cleanup_uncommitted(&self) -> Result<(), Box<dyn Error>>  {
+        for entry_result in fs::read_dir(&self.path)? {
             let entry = entry_result?;
             if entry.file_type()?.is_dir() {
                 for sub_entry_result in fs::read_dir(entry.path())? {
                     let sub_entry = sub_entry_result?;
-                    if entry.file_type()?.is_file() && entry.file_name().startswith("uncommitted") {
-                        remove_file(entry.path())?;
-                        // if this folder is now empty, delete it
-                        fs::remove_dir_all(entry.path())?;
+                    if sub_entry.file_type()?.is_file() && sub_entry.file_name().into_string().unwrap().starts_with("uncommitted") {
+                        remove_file(&sub_entry.path())?;
+                        if fs::read_dir(sub_entry.path().parent().unwrap()).unwrap().next().is_none() {
+                            // if this folder is now empty, delete it
+                            fs::remove_dir_all(sub_entry.path().parent().unwrap())?;
+                        }
                     }
                 }
             }
         }
-        Ok(());
+        Ok(())
     }
 
-    fn headerSanityCheck(&self) -> Result<(), Box<dyn Error>> {
+    fn general_sanity_check(&self) -> Result<(), Box<dyn Error>> {
         // any folder should be 0 - 4
         // any file in those folders should be numeric
         // # of sstables should match header
         // sstable names should be increasing (0 - # - 1)
-        let mut levels_per_folder = [0; 5];
-        for entry_result in fs::read_dir(path)? {
+        let mut num_levels: usize = 5;
+        while num_levels != 0 && self.tables_per_level.unwrap()[num_levels - 1] == 0 {
+            num_levels -= 1;
+        }
+        for entry_result in fs::read_dir(&self.path)? {
             let entry = entry_result?;
             if entry.file_type()?.is_dir() {
-                let level = match entry.file_name().parse::<i8>() {
+                let level = match entry.file_name().into_string().unwrap().parse::<u8>() {
                     Ok(value) => Ok(value),
-                    Err(e) => Err(InvalidDatabaseStateError::UnexpectedUserFolder)
-                }?
+                    Err(_) => Err(InvalidDatabaseStateError::UnexpectedUserFolder{folderpath: entry.file_name().into_string().unwrap()})
+                }?;
                 if level > 4 {
-                    return Err(InvalidDatabaseStateError::LevelTooLarge(level));
+                    return Err(InvalidDatabaseStateError::LevelTooLarge{level})?;
                 }
                 // assumption: if there is some valid file/fodler, then it was generated by the database
-                if level >= num_levels {
+                if level >= num_levels as u8 {
                     // if there is a level that is not reflected in header and given our previous assumption
                     // then it was generated by a failed compaction
                     // delete folder and continue
-                    fs::remove_dir_all(entry.path());
+                    fs::remove_dir_all(entry.path())?;
                     continue;
                 }
                 // let's count sstables
                 // let's assume that if the filename is valid, then it is a valid sstable
                 // could do serialization/corruption checks with checksum
-                let mut vec = Vec::new();
+                let mut actual = Vec::new();
                 for sub_entry_result in fs::read_dir(entry.path())? {
                     // ensure this is a valid 
                     let sub_entry = sub_entry_result?;
                     if sub_entry.file_type()?.is_dir() {
-                        return Err(InvalidDatabaseStateError::UnexpectedUserFolder(sub_entry.file_name()));
+                        return Err(InvalidDatabaseStateError::UnexpectedUserFolder{folderpath: sub_entry.file_name().into_string().unwrap()})?;
                     }
-                    let table_name = match sub_entry.file_name().parse::<i8>() {
+                    let table_name = match sub_entry.file_name().into_string().unwrap().parse::<u8>() {
                         Ok(value) => Ok(value),
-                        Err(e) => Err(InvalidDatabaseStateError::UnexpectedUserFile(sub_entry.file_name()))
+                        Err(_) => Err(InvalidDatabaseStateError::UnexpectedUserFile{filepath: sub_entry.file_name().into_string().unwrap()})
                     }?;
-                    vec.push(table_name);
+                    actual.push(table_name);
                 }
-                vec.sort();
+                actual.sort();
                 // TODO: if database fails during compaction, wal replay or memtable flush
                 // there may be too many sstables and we can just delete them
                 // this must be equal to the range from 0 to # expected - 1
-                // revisit
-                let ex_vec: Vec<i32> = (0..self.tables_per_level[filename]).collect();
-                if vec != ex_vec {
-                    return Err(InvalidDatabaseStateError::SSTableMismatch);
+                // must revisit
+                let expected: Vec<u8> = (0..self.tables_per_level.unwrap()[level as usize]).collect();
+                if actual != expected {
+                    return Err(InvalidDatabaseStateError::SSTableMismatch{expected, actual})?;
                 }
             } else if entry.file_type()?.is_file() && (entry.file_name() != "header" || entry.file_name() != "wal") {
-                return Err(InvalidDatabaseStateError::UnexpectedUserFile(entry.file_name()))
+                return Err(InvalidDatabaseStateError::UnexpectedUserFile{filepath: entry.path().into_os_string().into_string().unwrap()})?;
             }
         }
-        Ok(());
+        Ok(())
     }
 }
 // read:
@@ -247,3 +261,5 @@ impl Tree {
 // need to figure out sync for in memory and disk ds
 // could compact in another thread
 // batch io
+
+fn main() {}
