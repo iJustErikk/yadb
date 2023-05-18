@@ -4,8 +4,7 @@ yet another database
 making a db. with ~~rocksdb~~ ~~rust~~ ~~go/cockroachdb's pebble.~~ actually going back to rust, writing my own storage engine.
 
 storage engine:
-this is based on LSM trees. going to use the standard optimizations like bloom filters and such
-need to look into other optimizations rocksdb uses. I'd like to build something like cockroach db. i really need to dig into things more. I need to review how storage engine design affects r/w/s amplification, see if I should implement multi-level lsm, check out different compaction strategies...
+This is a lsm tree supporting (that will support) level compaction and bloom filters. The user will be able to tune some settings for their workloads. Working on getting this working. Next is cleaning up the config/API/error handling and writing some tests.
 
 next up:
 - make this more usable (tables, client library, sql support/indices)

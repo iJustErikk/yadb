@@ -10,22 +10,34 @@ use std::io::Write;
 use std::io::Read;
 use std::fmt;
 
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use std::io::{self, Read, Write};
+use std::convert::TryFrom;
+
 extern crate crossbeam_skiplist;
 use crossbeam_skiplist::SkipMap;
+
+// on tuning bloom filters:
+// given a target false positive probability, we can calculate how many hash functions/bits per key we need
+// cockroach's pebble uses 10, and they say that yields a 1% false positive rate
+// that sounds like a reasonable default
+// ^^ this can be the size of the skipmap or easily be calculated during compaction
+// i also would like to avoid rehashing during compaction
+
+
 // metrics:
 // - wal replays
 // - wal replay total bytes
 // - # sstables
-// - 
+// - disk usage
+// - avg sstable size
 
+// look into: no copy network -> fs, I believe kafka or some other "big" tool does this
 // look into: checksums for integrity
 // look into: retry mechanism for failed fs calls
 // TODO: go through with checklist to make sure the database can fail at any point during wal replay, compaction or memtable flush
 // TODO: sometime later, create tests that mock fs state, test failures
 // TODO: handle unwraps
-
-// byte ordering: rust uses whatever the user's machine is
-// as this is an embedded database, they are probably going with whatever their machine uses and there is no reason to let them choose
 
 // assumption: user does not create any files in the database
 
@@ -41,6 +53,7 @@ enum InvalidDatabaseStateError {
     UnexpectedUserFile { filepath: String },
     LevelTooLarge { level: u8 },
     SSTableMismatch { expected: Vec<u8>, actual: Vec<u8> },
+    CorruptWalEntry
 }
 
 impl fmt::Display for InvalidDatabaseStateError {
@@ -52,6 +65,7 @@ impl fmt::Display for InvalidDatabaseStateError {
             InvalidDatabaseStateError::UnexpectedUserFile { ref filepath } => write!(f, "Unexpected user file: {}", filepath),
             InvalidDatabaseStateError::LevelTooLarge { ref level } => write!(f, "Level too large: {}", level),
             InvalidDatabaseStateError::SSTableMismatch { ref expected, ref actual } => write!(f, "SSTable mismatch: expected {:?}, got {:?}", expected, actual),
+            InvalidDatabaseStateError::CorruptWalEntry => write!(f, "Corrupt Wal Entry")
         }
     }
 }
@@ -70,6 +84,12 @@ struct Tree {
 // from rocksdb:
 // Bloom Filter | Index Block | Data Block 1 | Data Block 2 | ... | Data Block N |
 // before each block: the number of bytes for that block (u64)
+// why use sparse index?
+// index gets loaded either way
+// so why not have it list all entries and get the exact block
+// then you do not need keys for data blocks...
+// this had to be more performant in some regard
+// ill benchmark this to see if its really better
 struct SSTable {
     // filter: Bloom<Vec<u8>>,
     // bloom filter implementations tend to want a fixed size type, might need to roll my own if I cannot find one
@@ -82,16 +102,69 @@ struct SSTable {
     // where k, v are byte buckets with 4 bytes preceding for size
 }
 
+#[derive(Debug)]
 // could provide more ops in future, like the merge operator in pebble/rocksdb
 enum Operation {
-    GET, PUT, DELETE, INVALID 
+    GET = 0, PUT = 1, DELETE = 2, INVALID = 3 
 }
 
+impl TryFrom<u8> for Operation {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Operation::GET),
+            1 => Ok(Operation::PUT),
+            2 => OK(Operation::DELETE),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Debug)]
 struct WALEntry {
     operation: Operation,
     key: Vec<u8>,
-    value: Vec<u8>
+    value: Vec<u8>,
 }
+
+impl WALEntry {
+    pub fn serialize<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        writer.write_u8(self.operation as u8)?;
+        writer.write_u64::<LittleEndian>(self.key.len() as u64)?;
+        writer.write_all(&self.key)?;
+        writer.write_u64::<LittleEndian>(self.value.len() as u64)?;
+        writer.write_all(&self.value)?;
+        writer.write_all(b"\n")?;
+        Ok(())
+    }
+
+    // this will fail if entry becomes corrupted or the write failed midway
+    // for either, let's make the assumption that it happened on the last walentry
+    // read to the end of the file
+    // comeback and think of a better solution
+    pub fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
+        let operation = reader.read_u8()?;
+        let operation = Operation::try_from(operation).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid operation"))?;
+        let key_len = reader.read_u64::<LittleEndian>()? as usize;
+        let mut key = vec![0; key_len];
+        reader.read_exact(&mut key)?;
+        let value_len = reader.read_u64::<LittleEndian>()? as usize;
+        let mut value = vec![0; value_len];
+        reader.read_exact(&mut value)?;
+        let mut newline = [0; 1];
+        reader.read_exact(&mut newline)?;
+        if newline[0] != b'\n' {
+            return Err(InvalidDatabaseStateError::CorruptWalEntry);
+        }
+        Ok(WALEntry {
+            operation,
+            key,
+            value,
+        })
+    }
+}
+
 
 // in memory only, serialize to sstable
 // use skipmap/skiplist, as it could be made wait-free and it's faster than in memory b tree (and moreso when accounting for lock contentions)
@@ -100,8 +173,6 @@ struct WALEntry {
 struct Memtable {
     skipmap: SkipMap<String, Vec<u8>>
     size: u64
-    // skiplist
-    // size counter
 }
 
 // init: user will specify a folder
@@ -119,7 +190,7 @@ impl Tree {
         self.init_folder()?;
         self.cleanup_uncommitted()?;
         self.general_sanity_check()?;
-        // self.tryRestoreWAL();
+        self.restore_wal();
         Ok(())
     }
     fn init_folder(&mut self) -> Result<(), Box<dyn Error>> {
@@ -232,44 +303,80 @@ impl Tree {
         // use that to find tightest key range block
         // iterate over that block to potentially find entry
     }
-    pub fn get(&self, key: Vec<u8>) <{
-        if self.memtable.skipmap.contains_key(key) {
-            return self.memtable.skipmap[key];
+    pub fn get(&self, key: Vec<u8>) -> Option<&Vec<u8>> {
+        if let Some(value) = self.memtable.skipmap.get(&key) {
+            return Some(value.value());
         }
         for level in 0..self.num_levels {
             for sstable in (0..self.tables_per_level[level]).rev() {
-                if let res = search_table(level, sstable), !res.is_none() {
-                    return res.unwrap();
-                };
-                
+                // If your search_table() function returns Option<Vec<u8>>, you can return it directly.
+                // You need to implement the function search_table()
+                return self.search_table(level, sstable);
             }
         }
         return None;
     }
-    fn flush_memtable() {
-        // we add memtable as a new sstable
-        // steps to go from 
-        // walk compactions up as needed
-    }
+    // convert skipmap to sstable
+    // start calling compaction
+    fn write_skipmap_as_sstable() {}
 
     fn append_to_wal(operation) {
-        // are we sure this is atomic?
-        // if not, how can we make it so?
+        operation.serialize(&mut self.wal_file);
+        // wal metadata should not change, so sync_data is fine to use, instead of sync_all/fsync
+        self.wal_file.sync_data();
     }
 
-    fn restore_wal() {
-        // convert wal to sstable and write
-        // wal is at most as big as a full memtable
+    fn restore_wal(&mut self) -> Result<(), Box<dyn Error>> {
+        let mut operations = Vec::new();
+        loop {
+            match WALEntry::deserialize(&mut self.wal_file) {
+                Ok(operation) => operations.push(operation),
+                Err(e) => {
+                    // when the write fails short
+                    if e.kind() == io::ErrorKind::UnexpectedEof {
+                        break;
+                    } else {
+                        return Err(Box::new(e));
+                    }
+                }
+            }
+        }
+
+        let mut skipmap = SkipMap::new();
+
+        for operation in operations {
+            match operation.operation {
+                Operation::PUT => { skipmap[operation.key] = operation.value }
+                Operation::DELETE => { skipmap.remove(operation.key); }
+                _ => {}
+            }
+        }
+
+        write_skipmap_as_sstable(skipmap)
+
+
+        fs::remove_file(self.path.clone().join("wal"))?;
+
+        File::create(self.path.clone().join("wal"))?;
+
+        Ok(())
     }
 
     fn add_operation(operation) {
-        let old_size = self.memtable.skipmap.contains_key(key) ? self.memtable.skipmap[key].size : 0;
-        let new_size = value.size;
+        let old_size = self.memtable.skipmap.contains_key(key) ? (key.size + self.memtable.skipmap[key].size) : 0;
+        let new_size = key.size + value.size;
         self.size += (new_size - old_size);
-        self.memtable.skipmap[key] = value;
+        if (operation == Operation::PUT) {
+            self.memtable.skipmap[key] = value;
+        } else if (operation == Operation::DELETE) {
+            self.memtable.remove(key);
+        }
         append_to_wal(operation);
+        // TODO: no magic values
+        // add config setting
         if self.size > 1_000_000 {
-            flush_memtable();
+            write_skipmap_as_sstable(self.skipmap);
+            self.skipmap = SkipMap::New();
         }
     }
 
@@ -283,35 +390,6 @@ impl Tree {
         add_operation(WALEntry{operation: Operation::DELETE, key, value});
     }
 }
-// read:
-// search memtable first
-// lower levels are newer than older levels. so start reading from the bottom most level and work upwards if key not found
-// we should "append" sstables and read them in the order opposite of insertion into level
-// this will give us the most recent key if it exists
-// key exists at most once in single sstable, due to compaction or just avoiding that when writing to memtable
-// so no need for LUB for finding the latest instance, can just use regular binary search
-// add bloom filters after
-// for bloom filter: search only if bloom filter cannot guarantee key is not in sstable
-
-// write:
-// write to memtable until it is large enough to flush (1mb?)
-// memtable should be sorted and have unique keys before writing as sstable
-
-// compaction:
-// come back to this
-// perform compaction when single level hits 10 sstables? (leveldb)
-// could just up to 10 pointers through, order traversal first by key and then by table age
-
-// durability:
-// use WAL, append on every write (how do I ensure this append is atomic?)
-// on failure, WAL is no larger than full sstable
-// when restoring (on startup, check if this is empty file):
-// read into memory
-// convert to sstable format (sort, remove duplicates)
-// append as sstable
-// clear wal
-// compaction should update the LSM tree only as a last step
-// all wal disk io should be flushed to disk immediately
 
 // compression:
 // find a good compression algorithm
