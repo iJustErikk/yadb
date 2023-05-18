@@ -61,23 +61,25 @@ impl Error for InvalidDatabaseStateError {}
 struct Tree {
     // let's start with 5 levels
     // this is a lot of space 111110 mb ~ 108.5 gb
+    num_levels: usize,
     tables_per_level: Option<[u8; 5]>,
     path: PathBuf
     memtable: Memtable
 }
 
-// BoB are preceded by 4 bytes signifying length
-struct IndexEntry {
-    key: Vec<u8>,
-    offset: i64,
-    length: i64
-}
-
+// from rocksdb:
+// Bloom Filter | Index Block | Data Block 1 | Data Block 2 | ... | Data Block N |
+// before each block: the number of bytes for that block (u64)
 struct SSTable {
-    // meta (offsets, lengths for bloom filter, index, data)
-    // bloom filter
-    index: Vec<IndexEntry>,
-    data: Vec<u8>
+    // filter: Bloom<Vec<u8>>,
+    // bloom filter implementations tend to want a fixed size type, might need to roll my own if I cannot find one
+    // or cap the size on keys (what is reasonable?)
+    // also: what are reasonable parameter defaults for bloom filter?
+    // I don't know how reasonable exposing this would be to the user
+    // what is the impact on r/w/s amplification? Could I give them some indication on tuning it?
+    index: Vec<String>,
+    // data blocks (kv | kv | kv)
+    // where k, v are byte buckets with 4 bytes preceding for size
 }
 
 // could provide more ops in future, like the merge operator in pebble/rocksdb
@@ -173,6 +175,8 @@ impl Tree {
         while num_levels != 0 && self.tables_per_level.unwrap()[num_levels - 1] == 0 {
             num_levels -= 1;
         }
+        // stuff is getting initialized in too many places...is there a better way to do this?
+        self.num_levels = Some(num_levels);
         for entry_result in fs::read_dir(&self.path)? {
             let entry = entry_result?;
             if entry.file_type()?.is_dir() {
@@ -222,26 +226,40 @@ impl Tree {
         }
         Ok(())
     }
+    fn search_table(level: usize, table: u8) {
+        // not checking bloom filter yet
+        // load sparse index into memory
+        // use that to find tightest key range block
+        // iterate over that block to potentially find entry
+    }
     pub fn get(&self, key: Vec<u8>) <{
         if self.memtable.skipmap.contains_key(key) {
             return self.memtable.skipmap[key];
         }
-        // search the fs
-        // iterate over sstables
-        // no bloom filter yet
-        // are we sure the bloom filter brings any speed?
-        // bloom filter can be fit into 1 io
-        // how can we avoid loading full keyspace in when searching?
+        for level in 0..self.num_levels {
+            for sstable in (0..self.tables_per_level[level]).rev() {
+                if let res = search_table(level, sstable), !res.is_none() {
+                    return res.unwrap();
+                };
+                
+            }
+        }
+        return None;
     }
     fn flush_memtable() {
         // we add memtable as a new sstable
+        // steps to go from 
         // walk compactions up as needed
     }
 
     fn append_to_wal(operation) {
         // are we sure this is atomic?
         // if not, how can we make it so?
-        // simply append to wal
+    }
+
+    fn restore_wal() {
+        // convert wal to sstable and write
+        // wal is at most as big as a full memtable
     }
 
     fn add_operation(operation) {
