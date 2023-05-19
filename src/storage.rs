@@ -35,9 +35,10 @@ use crossbeam_skiplist::SkipMap;
 // look into: no copy network -> fs, I believe kafka or some other "big" tool does this
 // look into: checksums for integrity
 // look into: retry mechanism for failed fs calls
+// look into: caching frequently read blocks (not keys, just avoid the block read io)
 // TODO: go through with checklist to make sure the database can fail at any point during wal replay, compaction or memtable flush
 // TODO: sometime later, create tests that mock fs state, test failures
-// TODO: handle unwraps
+// TODO: handle unwraps correctly
 
 // assumption: user does not create any files in the database
 
@@ -45,6 +46,8 @@ use crossbeam_skiplist::SkipMap;
 // I'd imagine things would get corrupted quickly
 // maybe have a sanity check and some mechanism like a lock/lease?
 // when testing: mark process so it can be easily killed prior to startup
+// assumption: in the future: user wants lexicographic ordering on keys
+// as this is embedded, user could provide custom comparator or merge operator
 #[derive(Debug)]
 enum InvalidDatabaseStateError {
     MissingHeader,
@@ -90,17 +93,6 @@ struct Tree {
 // then you do not need keys for data blocks...
 // this had to be more performant in some regard
 // ill benchmark this to see if its really better
-struct SSTable {
-    // filter: Bloom<Vec<u8>>,
-    // bloom filter implementations tend to want a fixed size type, might need to roll my own if I cannot find one
-    // or cap the size on keys (what is reasonable?)
-    // also: what are reasonable parameter defaults for bloom filter?
-    // I don't know how reasonable exposing this would be to the user
-    // what is the impact on r/w/s amplification? Could I give them some indication on tuning it?
-    index: Vec<String>,
-    // data blocks (kv | kv | kv)
-    // where k, v are byte buckets with 4 bytes preceding for size
-}
 
 #[derive(Debug)]
 // could provide more ops in future, like the merge operator in pebble/rocksdb
@@ -121,14 +113,46 @@ impl TryFrom<u8> for Operation {
     }
 }
 
-#[derive(Debug)]
+struct DataBlock {
+    keys: Vec<Vec<u8>>,
+    values: Vec<Vec<u8>>
+}
+
 struct WALEntry {
     operation: Operation,
     key: Vec<u8>,
     value: Vec<u8>,
 }
 
+impl DataBlock {
+    // TODO: write_all and read_exact do not respect the host endianness
+    pub fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
+        let block_size = reader.read_u8()?;
+        let mut block = vec![0; block_size];
+        reader.read_exact(&mut block)?;
+        let cursor = Cursor::new(block);
+        let keys = Vec::new();
+        let values = Vec::new();
+        while cursor.position() != cursor.get_ref().len() as u64 {
+            let key_size = cursor.read_u8()?;
+            // TODO: does vec! expect all arguments to be compile time?
+            let mut key = vec![0; key_size];
+            reader.read_exact(&mut key)?;
+
+
+            let value_size = cursor.read_u8()?;
+            let mut key = vec![0; value_size];
+            reader.read_exact(&mut key)?;
+            keys.append(key)
+            values.append(value)
+        }
+
+        return DataBlock{keys, values};
+    }
+}
+
 impl WALEntry {
+    // TODO: read_exact does not respect the host endianness
     pub fn serialize<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         writer.write_u8(self.operation as u8)?;
         writer.write_u64::<LittleEndian>(self.key.len() as u64)?;
@@ -297,11 +321,19 @@ impl Tree {
         }
         Ok(())
     }
-    fn search_table(level: usize, table: u8) {
+    fn search_table(level: usize, table: u8, key) {
         // not checking bloom filter yet
-        // load sparse index into memory
-        // use that to find tightest key range block
-        // iterate over that block to potentially find entry
+        let table = File::open(self.path.clone().join(level).join(table))?;
+        let index = Index::deserialize(table)?;
+        let block_num = search_index(index, key);
+        advance_file_pointer(block_num);
+        let block = Block::deserialize(table);
+        for key in block.keys {
+            if key == key {
+                return value
+            }
+        }
+        return None
     }
     pub fn get(&self, key: Vec<u8>) -> Option<&Vec<u8>> {
         if let Some(value) = self.memtable.skipmap.get(&key) {
@@ -318,7 +350,46 @@ impl Tree {
     }
     // convert skipmap to sstable
     // start calling compaction
-    fn write_skipmap_as_sstable() {}
+    fn write_skipmap_as_sstable(level, table_to_write, skipmap) {
+        let mut file = File::create(self.path.clone().join(level).join("uncommited" + table_to_write))?;
+        // when compacting: how can we avoid 2 passes?
+        // we cannot load everything into memory
+        // but we do not know the exact size of the index, so how could we write index/data blocks at same time?
+        // need to write them at same time, as we cannot write one before the other
+        // could estimate that the new index will be the size of both added together
+
+        // index is key size | key | u64 offset for block <- merely the bytes written before that block, into the data section
+        let index = Vec::new();
+        let data_section = Vec::new();
+        let current_block = Vec::new();
+        let keys_visited = 0;
+        for (key, value) in &skipmap {
+            keys_visited++;
+            // first item in block demarcates block
+            if (current_block.size == 0) {
+                index.append(key.size)
+                index.extend(key)
+                // offset for block is # bytes before block
+                index.append(data_section.size)
+            }
+            current_block.append(key.size)
+            current_block.extend(key)
+            current_block.append(value.size)
+            current_block.extend(value)
+            // we need to flush block if its full or if its the last block
+            // TODO: magic value
+            if current_block.size > 4_000 || keys_visited == skipmap.size {
+                data_section.append(current_block.size)
+                data_section.extend(current_block)
+            }
+
+        }
+        file.write(index.size)
+        file.write_all(index)
+        file.write_all(data_section)
+        fs::rename(file, table_to_write);
+        file.sync_data();
+    }
 
     fn append_to_wal(operation) {
         operation.serialize(&mut self.wal_file);
@@ -379,8 +450,6 @@ impl Tree {
             self.skipmap = SkipMap::New();
         }
     }
-
-    // not sure if Vec is hashable...hopefully
 
     pub fn put(&self, key: Vec<u8>, value: Vec<u8>) {
         add_operation(WALEntry{operation: Operation::PUT, key, value});
