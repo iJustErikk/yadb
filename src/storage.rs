@@ -1,6 +1,9 @@
 // lsm based storage engine
 // level compaction whenever level hits 10 sstables
 use std::fs;
+use std::io::Cursor;
+use std::io::Seek;
+use std::io::SeekFrom;
 use fs::File;
 use fs::remove_file;
 use std::path::PathBuf;
@@ -9,9 +12,9 @@ use std::error::Error;
 use std::io::Write;
 use std::io::Read;
 use std::fmt;
-
+extern crate byteorder;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use std::io::{self, Read, Write};
+use std::io::{self};
 use std::convert::TryFrom;
 
 extern crate crossbeam_skiplist;
@@ -110,10 +113,11 @@ impl Error for InvalidDatabaseStateError {}
 struct Tree {
     // let's start with 5 levels
     // this is a lot of space 111110 mb ~ 108.5 gb
-    num_levels: usize,
+    num_levels: Option<usize>,
     tables_per_level: Option<[u8; 5]>,
-    path: PathBuf
-    memtable: Memtable
+    path: PathBuf,
+    memtable: Memtable,
+    wal_file: File
 }
 
 // from rocksdb:
@@ -128,6 +132,7 @@ struct Tree {
 
 #[derive(Debug)]
 // could provide more ops in future, like the merge operator in pebble/rocksdb
+#[derive(PartialEq)]
 enum Operation {
     GET = 0, PUT = 1, DELETE = 2, INVALID = 3 
 }
@@ -139,13 +144,13 @@ impl TryFrom<u8> for Operation {
         match value {
             0 => Ok(Operation::GET),
             1 => Ok(Operation::PUT),
-            2 => OK(Operation::DELETE),
+            2 => Ok(Operation::DELETE),
             _ => Err(()),
         }
     }
 }
 
-struct DataBlock {
+struct Index {
     keys: Vec<Vec<u8>>,
     values: Vec<Vec<u8>>
 }
@@ -156,30 +161,32 @@ struct WALEntry {
     value: Vec<u8>,
 }
 
+struct DataBlock {
+    entries: Vec<(Vec<u8>, Vec<u8>)>
+}
+
 impl DataBlock {
     // TODO: write_all and read_exact do not respect the host endianness
     pub fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
         let block_size = reader.read_u8()?;
-        let mut block = vec![0; block_size];
+        let mut block = vec![0; block_size as usize];
         reader.read_exact(&mut block)?;
         let cursor = Cursor::new(block);
-        let keys = Vec::new();
-        let values = Vec::new();
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         while cursor.position() != cursor.get_ref().len() as u64 {
             let key_size = cursor.read_u8()?;
             // TODO: does vec! expect all arguments to be compile time?
-            let mut key = vec![0; key_size];
+            let mut key = vec![0; key_size as usize];
             reader.read_exact(&mut key)?;
 
 
             let value_size = cursor.read_u8()?;
-            let mut key = vec![0; value_size];
-            reader.read_exact(&mut key)?;
-            keys.append(key)
-            values.append(value)
+            let mut value = vec![0; value_size as usize];
+            reader.read_exact(&mut value)?;
+            entries.append(&mut (key, value));
         }
 
-        return DataBlock{keys, values};
+        return Ok(DataBlock{entries: entries});
     }
 }
 
@@ -199,7 +206,7 @@ impl WALEntry {
     // for either, let's make the assumption that it happened on the last walentry
     // read to the end of the file
     // comeback and think of a better solution
-    pub fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
+    pub fn deserialize<R: Read>(reader: &mut R) -> Result<Self, Box<dyn Error>> {
         let operation = reader.read_u8()?;
         let operation = Operation::try_from(operation).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid operation"))?;
         let key_len = reader.read_u64::<LittleEndian>()? as usize;
@@ -211,7 +218,7 @@ impl WALEntry {
         let mut newline = [0; 1];
         reader.read_exact(&mut newline)?;
         if newline[0] != b'\n' {
-            return Err(InvalidDatabaseStateError::CorruptWalEntry);
+            return Err(InvalidDatabaseStateError::CorruptWalEntry)?;
         }
         Ok(WALEntry {
             operation,
@@ -227,8 +234,8 @@ impl WALEntry {
 // although I am sure a wait-free tree does exist, skiplists are much simpler
 // this skiplist may or may not be wait-free...still need to look into it (maybe code my own)
 struct Memtable {
-    skipmap: SkipMap<String, Vec<u8>>
-    size: u64
+    skipmap: SkipMap<Vec<u8>, Vec<u8>>,
+    size: usize
 }
 
 // init: user will specify a folder
@@ -240,7 +247,7 @@ struct Memtable {
 // those folders will contain files named 0, 1, 2, 3... containing sstables of increasing recency
 impl Tree {
     pub fn new(path: PathBuf) -> Self{
-        return Tree {tables_per_level: None, path, Memtable{skipmap: SkipMap::new(), size: 0}}
+        return Tree {num_levels: None, wal_file: None, tables_per_level: None, path, memtable: Memtable{skipmap: SkipMap::new(), size: 0}};
     }
     pub fn init(&mut self) -> Result<(), Box<dyn Error>> {
         self.init_folder()?;
@@ -370,17 +377,17 @@ impl Tree {
     // if key < index_keys[mid] -> cuts right half (keeps mid's block), very much still in there
     // if key >= index_keys[mid + 1] -> cuts left half -> left half is known to be less
     // these maintain our containing invariant so this is correct
-    fn search_index(index_keys, key) {
+    fn search_index(self, index_keys: Vec<Vec<u8>>, key: Vec<u8>) -> Option<i64> {
         if key < index_keys[0] {
             return None
         }
         let mut left = 0;
-        let mut right = index_keys.size - 1;
+        let mut right = index_keys.len() - 1;
         loop {
-            let mid = (l + r) / 2;
-            if mid == index_keys.size - 1 {
-                assert(key >= index_keys[index_keys.size - 1])
-                return mid;
+            let mid = (left + right) / 2;
+            if mid == index_keys.len() - 1 {
+                assert!(key >= index_keys[index_keys.len() - 1]);
+                return Some(mid as i64);
             }
             if key < index_keys[mid] {
                 right = mid;
@@ -388,21 +395,24 @@ impl Tree {
                 left = mid + 1;
             } else {
                 // if key > start && < end -> in bucket
-                return mid;
+                return Some(mid as i64);
             }
         }
-        return None;
     }
-    fn search_table(level: usize, table: u8, key) {
+    fn search_table(&self, level: usize, table: u8, key: Vec<u8>) -> Option<&Vec<u8>> {
         // not checking bloom filter yet
-        let table = File::open(self.path.clone().join(level).join(table))?;
+        let table = File::open(self.path.clone().join(level.to_string()).join(table.to_string()))?;
         let index = Index::deserialize(table)?;
-        let block_num = search_index(index.keys, key);
-        advance_file_pointer(block_num);
-        let block = Block::deserialize(table);
-        for key in block.keys {
-            if key == key {
-                return value
+        let block_num = self.search_index(index.keys, key);
+        if block_num.is_none() {
+            return None;
+        }
+        table.seek(SeekFrom::Current(block_num.unwrap()))?;
+        let block = DataBlock::deserialize(&mut table).unwrap();
+        for (cantidate_key, value) in block.entries {
+            if cantidate_key == key {
+                // should pair these, dunno why I have them separate
+                return Some(&value);
             }
         }
         return None
@@ -411,64 +421,70 @@ impl Tree {
         if let Some(value) = self.memtable.skipmap.get(&key) {
             return Some(value.value());
         }
-        for level in 0..self.num_levels {
-            for sstable in (0..self.tables_per_level[level]).rev() {
+        for level in 0..self.num_levels.unwrap() {
+            for sstable in (0..self.tables_per_level.unwrap()[level]).rev() {
                 // If your search_table() function returns Option<Vec<u8>>, you can return it directly.
                 // You need to implement the function search_table()
                 // TODO: if value vector is empty, this is a tombstone
-                return self.search_table(level, sstable);
+                return self.search_table(level, sstable, key);
             }
         }
         return None;
     }
+    fn get_next_sstable_location() {
+
+    }
     // convert skipmap to sstable
     // start calling compaction
-    fn write_skipmap_as_sstable(level, table_to_write, skipmap) {
-        let mut file = File::create(self.path.clone().join(level).join("uncommited" + table_to_write))?;
+    fn write_skipmap_as_sstable(&self, skipmap: SkipMap<Vec<u8>, Vec<u8>>) {
+        // todo: compaction
+        let table_to_write = self.tables_per_level.unwrap()[0];
+
+        let mut table = File::create(self.path.clone().join(0.to_string()).join(String::from("uncommited") + &table_to_write.to_string())).unwrap();
         // index is key size | key | u64 offset for block <- merely the bytes written before that block, into the data section
-        let index = Vec::new();
-        let data_section = Vec::new();
-        let current_block = Vec::new();
+        let index: Vec<u8>  = Vec::new();
+        let data_section: Vec<u8> = Vec::new();
+        let current_block: Vec<u8> = Vec::new();
         let keys_visited = 0;
         for (key, value) in &skipmap {
-            keys_visited++;
+            keys_visited += 1;
             // first item in block demarcates block
-            if (current_block.size == 0) {
-                index.append(key.size)
-                index.extend(key)
+            if current_block.len() == 0 {
+                index.append(key.size);
+                index.extend(key);
                 // offset for block is # bytes before block
-                index.append(data_section.size)
+                index.append(data_section.len());
             }
-            current_block.append(key.size)
-            current_block.extend(key)
-            current_block.append(value.size)
-            current_block.extend(value)
+            current_block.append(key.size);
+            current_block.extend(key);
+            current_block.append(value.size);
+            current_block.extend(value);
             // we need to flush block if its full or if its the last block
             // TODO: magic value
-            if current_block.size > 4_000 || keys_visited == skipmap.size {
-                data_section.append(current_block.size)
-                data_section.extend(current_block)
+            if current_block.len() > 4_000 || keys_visited == skipmap.len() {
+                data_section.append(current_block.len());
+                data_section.extend(current_block);
             }
 
         }
-        file.write(index.size)
-        file.write_all(index)
-        file.write_all(data_section)
-        fs::rename(file, table_to_write);
-        file.sync_data();
+        table.write(index.len());
+        table.write_all(&index);
+        table.write_all(&data_section);
+        fs::rename(&table, table_to_write);
+        table.sync_data();
     }
 
-    fn append_to_wal(operation) {
-        operation.serialize(&mut self.wal_file);
+    fn append_to_wal(&self, entry: WALEntry) {
+        entry.serialize(&mut self.wal_file);
         // wal metadata should not change, so sync_data is fine to use, instead of sync_all/fsync
         self.wal_file.sync_data();
     }
 
     fn restore_wal(&mut self) -> Result<(), Box<dyn Error>> {
-        let mut operations = Vec::new();
+        let mut entries = Vec::new();
         loop {
             match WALEntry::deserialize(&mut self.wal_file) {
-                Ok(operation) => operations.push(operation),
+                Ok(entry) => entries.push(entry),
                 Err(e) => {
                     // when the write fails short
                     if e.kind() == io::ErrorKind::UnexpectedEof {
@@ -482,48 +498,49 @@ impl Tree {
 
         let mut skipmap = SkipMap::new();
 
-        for operation in operations {
-            match operation.operation {
-                Operation::PUT => { skipmap[operation.key] = operation.value }
-                Operation::DELETE => { skipmap.remove(operation.key); }
+        for entry in entries {
+            match entry.operation {
+                Operation::PUT => { skipmap.insert(entry.key, entry.value); }
+                Operation::DELETE => { skipmap.remove(&entry.key); }
                 _ => {}
             }
-        }
+        };
 
-        write_skipmap_as_sstable(skipmap)
+        self.write_skipmap_as_sstable(skipmap);
 
 
         fs::remove_file(self.path.clone().join("wal"))?;
 
-        File::create(self.path.clone().join("wal"))?;
+        self.wal_file = File::create(self.path.clone().join("wal"))?;
 
         Ok(())
     }
 
-    fn add_operation(operation) {
-        let old_size = self.memtable.skipmap.contains_key(key) ? (key.size + self.memtable.skipmap[key].size) : 0;
-        let new_size = key.size + value.size;
-        self.size += (new_size - old_size);
-        if (operation == Operation::PUT) {
-            self.memtable.skipmap[key] = value;
-        } else if (operation == Operation::DELETE) {
-            self.memtable.remove(key);
+    fn add_walentry(&mut self, entry: WALEntry) {
+        let old_size = if (self.memtable.skipmap.contains_key(&entry.key)) { entry.key.len() + self.memtable.skipmap.get(&entry.key).len()} else { 0};
+        let new_size = entry.key.len() + entry.value.len();
+        self.memtable.size += (new_size - old_size);
+        if entry.operation == Operation::PUT {
+            self.memtable.skipmap.insert(entry.key, entry.value);
+        } else if (entry.operation == Operation::DELETE) {
+            self.memtable.skipmap.remove(&entry.key);
         }
-        append_to_wal(operation);
+        self.append_to_wal(entry);
         // TODO: no magic values
         // add config setting
-        if self.size > 1_000_000 {
-            write_skipmap_as_sstable(self.skipmap);
-            self.skipmap = SkipMap::New();
+        if self.memtable.size > 1_000_000 {
+            self.write_skipmap_as_sstable(self.memtable.skipmap);
+            self.memtable.skipmap = SkipMap::new();
         }
     }
 
     pub fn put(&self, key: Vec<u8>, value: Vec<u8>) {
-        add_operation(WALEntry{operation: Operation::PUT, key, value});
+        self.add_walentry(WALEntry{operation: Operation::PUT, key, value});
     }
 
     pub fn delete(&self, key: Vec<u8>) {
-        add_operation(WALEntry{operation: Operation::DELETE, key, value});
+        // empty value is tombstone
+        self.add_walentry(WALEntry{operation: Operation::DELETE, key, value: Vec::new()});
     }
 }
 
