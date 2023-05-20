@@ -24,6 +24,34 @@ use crossbeam_skiplist::SkipMap;
 // ^^ this can be the size of the skipmap or easily be calculated during compaction
 // i also would like to avoid rehashing during compaction
 
+// when compacting: how can we avoid 2 passes? (cannot do this completely in memory!)
+// we cannot load everything into memory
+// but we do not know the exact size of the index, so how could we write index/data blocks at same time?
+// need to write them at same time, as we cannot write one before the other
+// could estimate that the new index will be the size of both added together
+
+// solution: make the index go after the datablock
+// compaction algorithm:
+// walk through each of the 10 files
+// find smallest key of oldest file, add it to datablock creator
+// datablock creator will overwrite a key if it is fed the same key (thus taking the younger one)
+// if the current block size exceeds the limit, it will create a new block
+// the first item of a block is added to the index
+// we'll immediately write the data block
+// then we write the index
+// this allows us to avoid a two pass read during compaction
+// unfortunately, it adds another io to reads (read the size of the datablock, skip that number of bytes)
+// we could just cache that number, it is basically free (4 bytes)
+// we could also cache the index, this may be infeasible. let's assume a key is 10% the number of bytes as the value and that 1% of keys in a 
+// data block are represented in the sparse index
+// then the index is roughly 1/1000 the size of the data block
+// if we have terabytes on disk, that would be gigabytes in memory
+// that is actually reasonable
+// we could just cache what matters (lru)
+// and we could cache compressed keys
+// maybe we could have a compression function that preserves the ordering (this seems difficult)
+// or we could just compress/decompress if memory gets too full (lots of cpu- this could be parallelized)
+
 
 // metrics:
 // - wal replays
@@ -31,6 +59,10 @@ use crossbeam_skiplist::SkipMap;
 // - # sstables
 // - disk usage
 // - avg sstable size
+// - overhead (lsm size) / (number of all bytes of keys, values, not including lengths)
+// - read ios / read operation
+// - write ios / write operation
+// - number of corrupt rows
 
 // look into: no copy network -> fs, I believe kafka or some other "big" tool does this
 // look into: checksums for integrity
@@ -321,11 +353,51 @@ impl Tree {
         }
         Ok(())
     }
+    // returns the bucket a key is potentially inside
+    // each bucket i is [start key at i, start key at i + 1)
+    // binary search over i
+    // find i such that key is in the bucket
+    // note: this always returns the last bucket for a key that is larger than the last bucket start key
+    // if key in range, return mid
+    // if key < start key, move right pointer to mid
+    // if key >= next start key, move left pointer to right
+    // proof of correctness:
+    // assume value is in some bucket in the array
+    // if throughout the execution the value is in the range of buckets, then it is correct
+    // if all search space cuts preserve this, then we will return the bucket containing, as eventually
+    // ...there will be only 1 bucket and that has to satisfy the property (could do proof by contradiction, see that if this was not the case...
+    //  then there would be a different partitioning of the search space and thus a different last block)
+    // if key < index_keys[mid] -> cuts right half (keeps mid's block), very much still in there
+    // if key >= index_keys[mid + 1] -> cuts left half -> left half is known to be less
+    // these maintain our containing invariant so this is correct
+    fn search_index(index_keys, key) {
+        if key < index_keys[0] {
+            return None
+        }
+        let mut left = 0;
+        let mut right = index_keys.size - 1;
+        loop {
+            let mid = (l + r) / 2;
+            if mid == index_keys.size - 1 {
+                assert(key >= index_keys[index_keys.size - 1])
+                return mid;
+            }
+            if key < index_keys[mid] {
+                right = mid;
+            } else if key >= index_keys[mid + 1]  {
+                left = mid + 1;
+            } else {
+                // if key > start && < end -> in bucket
+                return mid;
+            }
+        }
+        return None;
+    }
     fn search_table(level: usize, table: u8, key) {
         // not checking bloom filter yet
         let table = File::open(self.path.clone().join(level).join(table))?;
         let index = Index::deserialize(table)?;
-        let block_num = search_index(index, key);
+        let block_num = search_index(index.keys, key);
         advance_file_pointer(block_num);
         let block = Block::deserialize(table);
         for key in block.keys {
@@ -343,6 +415,7 @@ impl Tree {
             for sstable in (0..self.tables_per_level[level]).rev() {
                 // If your search_table() function returns Option<Vec<u8>>, you can return it directly.
                 // You need to implement the function search_table()
+                // TODO: if value vector is empty, this is a tombstone
                 return self.search_table(level, sstable);
             }
         }
@@ -352,12 +425,6 @@ impl Tree {
     // start calling compaction
     fn write_skipmap_as_sstable(level, table_to_write, skipmap) {
         let mut file = File::create(self.path.clone().join(level).join("uncommited" + table_to_write))?;
-        // when compacting: how can we avoid 2 passes?
-        // we cannot load everything into memory
-        // but we do not know the exact size of the index, so how could we write index/data blocks at same time?
-        // need to write them at same time, as we cannot write one before the other
-        // could estimate that the new index will be the size of both added together
-
         // index is key size | key | u64 offset for block <- merely the bytes written before that block, into the data section
         let index = Vec::new();
         let data_section = Vec::new();
