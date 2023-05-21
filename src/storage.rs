@@ -20,6 +20,16 @@ use std::convert::TryFrom;
 extern crate crossbeam_skiplist;
 use crossbeam_skiplist::SkipMap;
 
+// what we (de)serialize:
+// wal log
+// indexes
+// data blocks
+// ensure that: 
+// - endianness is not an issue
+// - writes and reads agree
+// - leave room for error handling
+
+
 // on tuning bloom filters:
 // given a target false positive probability, we can calculate how many hash functions/bits per key we need
 // cockroach's pebble uses 10, and they say that yields a 1% false positive rate
@@ -117,7 +127,7 @@ struct Tree {
     tables_per_level: Option<[u8; 5]>,
     path: PathBuf,
     memtable: Memtable,
-    wal_file: File
+    wal_file: Option<File>
 }
 
 // from rocksdb:
@@ -151,10 +161,22 @@ impl TryFrom<u8> for Operation {
 }
 
 struct Index {
-    keys: Vec<Vec<u8>>,
-    values: Vec<Vec<u8>>
+    entries: Vec<(Vec<u8>, u64)>,
 }
-
+impl Index {
+    pub fn deserialize<R: Read>(mut reader: R) -> Result<Index, Box<dyn Error>> {
+        let mut entries = Vec::new();
+        
+        while let Ok(key_size) = reader.read_u64::<LittleEndian>() {
+            let mut key = vec![0; key_size as usize];
+            reader.read_exact(&mut key)?;
+            let offset = reader.read_u64::<LittleEndian>()?;
+            entries.push((key, offset));
+        }
+    
+        Ok(Index{entries})
+    }
+}
 struct WALEntry {
     operation: Operation,
     key: Vec<u8>,
@@ -166,32 +188,29 @@ struct DataBlock {
 }
 
 impl DataBlock {
-    // TODO: write_all and read_exact do not respect the host endianness
     pub fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
         let block_size = reader.read_u8()?;
         let mut block = vec![0; block_size as usize];
         reader.read_exact(&mut block)?;
-        let cursor = Cursor::new(block);
-        let entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-        while cursor.position() != cursor.get_ref().len() as u64 {
+        let mut cursor = Cursor::new(block);
+        let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        while (cursor.position() as usize) < block.len() {
             let key_size = cursor.read_u8()?;
-            // TODO: does vec! expect all arguments to be compile time?
             let mut key = vec![0; key_size as usize];
-            reader.read_exact(&mut key)?;
+            cursor.read_exact(&mut key)?;
 
 
             let value_size = cursor.read_u8()?;
             let mut value = vec![0; value_size as usize];
-            reader.read_exact(&mut value)?;
-            entries.append(&mut (key, value));
+            cursor.read_exact(&mut value)?;
+            entries.push((key, value));
         }
 
-        return Ok(DataBlock{entries: entries});
+        Ok(DataBlock{entries: entries})
     }
 }
 
 impl WALEntry {
-    // TODO: read_exact does not respect the host endianness
     pub fn serialize<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         writer.write_u8(self.operation as u8)?;
         writer.write_u64::<LittleEndian>(self.key.len() as u64)?;
@@ -206,7 +225,7 @@ impl WALEntry {
     // for either, let's make the assumption that it happened on the last walentry
     // read to the end of the file
     // comeback and think of a better solution
-    pub fn deserialize<R: Read>(reader: &mut R) -> Result<Self, Box<dyn Error>> {
+    pub fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
         let operation = reader.read_u8()?;
         let operation = Operation::try_from(operation).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid operation"))?;
         let key_len = reader.read_u64::<LittleEndian>()? as usize;
@@ -218,7 +237,7 @@ impl WALEntry {
         let mut newline = [0; 1];
         reader.read_exact(&mut newline)?;
         if newline[0] != b'\n' {
-            return Err(InvalidDatabaseStateError::CorruptWalEntry)?;
+            return Err(InvalidDatabaseStateError::CorruptWalEntry);
         }
         Ok(WALEntry {
             operation,
@@ -377,21 +396,22 @@ impl Tree {
     // if key < index_keys[mid] -> cuts right half (keeps mid's block), very much still in there
     // if key >= index_keys[mid + 1] -> cuts left half -> left half is known to be less
     // these maintain our containing invariant so this is correct
-    fn search_index(self, index_keys: Vec<Vec<u8>>, key: Vec<u8>) -> Option<i64> {
-        if key < index_keys[0] {
+    fn search_index(self, index: Index, key: Vec<u8>) -> Option<i64> {
+        // TODO: do these comparators actl work?
+        if key < index.entries[0].0 {
             return None
         }
         let mut left = 0;
-        let mut right = index_keys.len() - 1;
+        let mut right = index.entries.len() - 1;
         loop {
             let mid = (left + right) / 2;
-            if mid == index_keys.len() - 1 {
-                assert!(key >= index_keys[index_keys.len() - 1]);
+            if mid == index.entries.len() - 1 {
+                assert!(key >= index.entries[index.entries.len() - 1].0);
                 return Some(mid as i64);
             }
-            if key < index_keys[mid] {
+            if key < index.entries[mid].0 {
                 right = mid;
-            } else if key >= index_keys[mid + 1]  {
+            } else if key >= index.entries[mid + 1].0  {
                 left = mid + 1;
             } else {
                 // if key > start && < end -> in bucket
@@ -401,13 +421,13 @@ impl Tree {
     }
     fn search_table(&self, level: usize, table: u8, key: Vec<u8>) -> Option<&Vec<u8>> {
         // not checking bloom filter yet
-        let table = File::open(self.path.clone().join(level.to_string()).join(table.to_string()))?;
-        let index = Index::deserialize(table)?;
-        let block_num = self.search_index(index.keys, key);
+        let mut table = File::open(self.path.clone().join(level.to_string()).join(table.to_string())).unwrap();
+        let index = Index::deserialize(table).unwrap();
+        let block_num = self.search_index(index, key);
         if block_num.is_none() {
             return None;
         }
-        table.seek(SeekFrom::Current(block_num.unwrap()))?;
+        table.seek(SeekFrom::Current(block_num.unwrap()));
         let block = DataBlock::deserialize(&mut table).unwrap();
         for (cantidate_key, value) in block.entries {
             if cantidate_key == key {
@@ -436,57 +456,58 @@ impl Tree {
     }
     // convert skipmap to sstable
     // start calling compaction
+    
     fn write_skipmap_as_sstable(&self, skipmap: SkipMap<Vec<u8>, Vec<u8>>) {
         // todo: compaction
         let table_to_write = self.tables_per_level.unwrap()[0];
+        let filename = format!("uncommitted{}", table_to_write.to_string());
+        let mut table = File::create(self.path.join("0").join(&filename)).unwrap();
 
-        let mut table = File::create(self.path.clone().join(0.to_string()).join(String::from("uncommited") + &table_to_write.to_string())).unwrap();
-        // index is key size | key | u64 offset for block <- merely the bytes written before that block, into the data section
-        let index: Vec<u8>  = Vec::new();
-        let data_section: Vec<u8> = Vec::new();
-        let current_block: Vec<u8> = Vec::new();
-        let keys_visited = 0;
-        for (key, value) in &skipmap {
+        let mut index: Vec<u8> = Vec::new();
+        let mut data_section: Vec<u8> = Vec::new();
+        let mut current_block: Vec<u8> = Vec::new();
+        let mut keys_visited = 0;
+        
+        for entry in &skipmap {
+            let key = entry.key();
+            let value = entry.value();
             keys_visited += 1;
-            // first item in block demarcates block
-            if current_block.len() == 0 {
-                index.append(key.size);
+            if current_block.is_empty() {
+                index.write_u64::<LittleEndian>(key.len() as u64).unwrap();
                 index.extend(key);
-                // offset for block is # bytes before block
-                index.append(data_section.len());
+                index.write_u64::<LittleEndian>(data_section.len() as u64).unwrap();
             }
-            current_block.append(key.size);
+            current_block.write_u64::<LittleEndian>(key.len() as u64).unwrap();
             current_block.extend(key);
-            current_block.append(value.size);
+            current_block.write_u64::<LittleEndian>(value.len() as u64).unwrap();
             current_block.extend(value);
-            // we need to flush block if its full or if its the last block
-            // TODO: magic value
             if current_block.len() > 4_000 || keys_visited == skipmap.len() {
-                data_section.append(current_block.len());
-                data_section.extend(current_block);
+                data_section.write_u64::<LittleEndian>(current_block.len() as u64).unwrap();
+                data_section.append(&mut current_block);
             }
-
         }
-        table.write(index.len());
-        table.write_all(&index);
-        table.write_all(&data_section);
-        fs::rename(&table, table_to_write);
-        table.sync_data();
+        
+        table.write_u64::<LittleEndian>(index.len() as u64).unwrap();
+        table.write_all(&index).unwrap();
+        table.write_all(&data_section).unwrap();
+        let old_path = self.path.join("0").join(&filename);
+        let new_path = self.path.join("0").join(table_to_write.to_string());
+        std::fs::rename(old_path, new_path).unwrap();
+        table.sync_data().unwrap();
     }
 
     fn append_to_wal(&self, entry: WALEntry) {
-        entry.serialize(&mut self.wal_file);
+        entry.serialize(&mut (self.wal_file.unwrap()));
         // wal metadata should not change, so sync_data is fine to use, instead of sync_all/fsync
-        self.wal_file.sync_data();
+        self.wal_file.unwrap().sync_data();
     }
 
     fn restore_wal(&mut self) -> Result<(), Box<dyn Error>> {
         let mut entries = Vec::new();
         loop {
-            match WALEntry::deserialize(&mut self.wal_file) {
+            match WALEntry::deserialize(&mut (self.wal_file.unwrap())) {
                 Ok(entry) => entries.push(entry),
                 Err(e) => {
-                    // when the write fails short
                     if e.kind() == io::ErrorKind::UnexpectedEof {
                         break;
                     } else {
@@ -495,6 +516,7 @@ impl Tree {
                 }
             }
         }
+        
 
         let mut skipmap = SkipMap::new();
 
@@ -511,18 +533,18 @@ impl Tree {
 
         fs::remove_file(self.path.clone().join("wal"))?;
 
-        self.wal_file = File::create(self.path.clone().join("wal"))?;
+        self.wal_file = Some(File::create(self.path.clone().join("wal")).unwrap());
 
         Ok(())
     }
 
     fn add_walentry(&mut self, entry: WALEntry) {
-        let old_size = if (self.memtable.skipmap.contains_key(&entry.key)) { entry.key.len() + self.memtable.skipmap.get(&entry.key).len()} else { 0};
+        let old_size = if self.memtable.skipmap.contains_key(&entry.key) { entry.key.len() + self.memtable.skipmap.get(&entry.key).unwrap().value().len()} else { 0};
         let new_size = entry.key.len() + entry.value.len();
-        self.memtable.size += (new_size - old_size);
+        self.memtable.size += new_size - old_size;
         if entry.operation == Operation::PUT {
             self.memtable.skipmap.insert(entry.key, entry.value);
-        } else if (entry.operation == Operation::DELETE) {
+        } else if entry.operation == Operation::DELETE {
             self.memtable.skipmap.remove(&entry.key);
         }
         self.append_to_wal(entry);
