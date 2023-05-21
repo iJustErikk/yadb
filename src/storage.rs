@@ -143,6 +143,7 @@ struct Tree {
 #[derive(Debug)]
 // could provide more ops in future, like the merge operator in pebble/rocksdb
 #[derive(PartialEq)]
+#[derive(Copy, Clone)]
 enum Operation {
     GET = 0, PUT = 1, DELETE = 2, INVALID = 3 
 }
@@ -192,9 +193,10 @@ impl DataBlock {
         let block_size = reader.read_u8()?;
         let mut block = vec![0; block_size as usize];
         reader.read_exact(&mut block)?;
+        let block_len = block.len();
         let mut cursor = Cursor::new(block);
         let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-        while (cursor.position() as usize) < block.len() {
+        while (cursor.position() as usize) < block_len {
             let key_size = cursor.read_u8()?;
             let mut key = vec![0; key_size as usize];
             cursor.read_exact(&mut key)?;
@@ -236,9 +238,9 @@ impl WALEntry {
         reader.read_exact(&mut value)?;
         let mut newline = [0; 1];
         reader.read_exact(&mut newline)?;
-        if newline[0] != b'\n' {
-            return Err(InvalidDatabaseStateError::CorruptWalEntry);
-        }
+        // if newline[0] != b'\n' {
+        //     return Err(InvalidDatabaseStateError::CorruptWalEntry)?;
+        // }
         Ok(WALEntry {
             operation,
             key,
@@ -319,7 +321,7 @@ impl Tree {
         Ok(())
     }
 
-    fn general_sanity_check(&self) -> Result<(), Box<dyn Error>> {
+    fn general_sanity_check(&mut self) -> Result<(), Box<dyn Error>> {
         // any folder should be 0 - 4
         // any file in those folders should be numeric
         // # of sstables should match header
@@ -396,7 +398,7 @@ impl Tree {
     // if key < index_keys[mid] -> cuts right half (keeps mid's block), very much still in there
     // if key >= index_keys[mid + 1] -> cuts left half -> left half is known to be less
     // these maintain our containing invariant so this is correct
-    fn search_index(self, index: Index, key: Vec<u8>) -> Option<i64> {
+    fn search_index(self, index: &Index, key: Vec<u8>) -> Option<i64> {
         // TODO: do these comparators actl work?
         if key < index.entries[0].0 {
             return None
@@ -423,7 +425,7 @@ impl Tree {
         // not checking bloom filter yet
         let mut table = File::open(self.path.clone().join(level.to_string()).join(table.to_string())).unwrap();
         let index = Index::deserialize(table).unwrap();
-        let block_num = self.search_index(index, key);
+        let block_num = self.search_index(&index, key);
         if block_num.is_none() {
             return None;
         }
@@ -457,7 +459,7 @@ impl Tree {
     // convert skipmap to sstable
     // start calling compaction
     
-    fn write_skipmap_as_sstable(&self, skipmap: SkipMap<Vec<u8>, Vec<u8>>) {
+    fn write_skipmap_as_sstable(&self, skipmap: &SkipMap<Vec<u8>, Vec<u8>>) {
         // todo: compaction
         let table_to_write = self.tables_per_level.unwrap()[0];
         let filename = format!("uncommitted{}", table_to_write.to_string());
@@ -468,7 +470,7 @@ impl Tree {
         let mut current_block: Vec<u8> = Vec::new();
         let mut keys_visited = 0;
         
-        for entry in &skipmap {
+        for entry in skipmap {
             let key = entry.key();
             let value = entry.value();
             keys_visited += 1;
@@ -496,22 +498,22 @@ impl Tree {
         table.sync_data().unwrap();
     }
 
-    fn append_to_wal(&self, entry: WALEntry) {
-        entry.serialize(&mut (self.wal_file.unwrap()));
+    fn append_to_wal(&mut self, entry: &WALEntry) {
+        entry.serialize(&mut (self.wal_file.as_mut().unwrap()));
         // wal metadata should not change, so sync_data is fine to use, instead of sync_all/fsync
-        self.wal_file.unwrap().sync_data();
+        self.wal_file.as_mut().unwrap().sync_data();
     }
 
-    fn restore_wal(&mut self) -> Result<(), Box<dyn Error>> {
+    fn restore_wal(&mut self) -> Result<(), io::Error> {
         let mut entries = Vec::new();
         loop {
-            match WALEntry::deserialize(&mut (self.wal_file.unwrap())) {
+            match WALEntry::deserialize(&mut (self.wal_file.as_mut().unwrap())) {
                 Ok(entry) => entries.push(entry),
                 Err(e) => {
                     if e.kind() == io::ErrorKind::UnexpectedEof {
                         break;
                     } else {
-                        return Err(Box::new(e));
+                        return Err(e);
                     }
                 }
             }
@@ -528,7 +530,7 @@ impl Tree {
             }
         };
 
-        self.write_skipmap_as_sstable(skipmap);
+        self.write_skipmap_as_sstable(&skipmap);
 
 
         fs::remove_file(self.path.clone().join("wal"))?;
@@ -547,20 +549,20 @@ impl Tree {
         } else if entry.operation == Operation::DELETE {
             self.memtable.skipmap.remove(&entry.key);
         }
-        self.append_to_wal(entry);
+        self.append_to_wal(&entry);
         // TODO: no magic values
         // add config setting
         if self.memtable.size > 1_000_000 {
-            self.write_skipmap_as_sstable(self.memtable.skipmap);
+            self.write_skipmap_as_sstable(&self.memtable.skipmap);
             self.memtable.skipmap = SkipMap::new();
         }
     }
 
-    pub fn put(&self, key: Vec<u8>, value: Vec<u8>) {
+    pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) {
         self.add_walentry(WALEntry{operation: Operation::PUT, key, value});
     }
 
-    pub fn delete(&self, key: Vec<u8>) {
+    pub fn delete(&mut self, key: Vec<u8>) {
         // empty value is tombstone
         self.add_walentry(WALEntry{operation: Operation::DELETE, key, value: Vec::new()});
     }
