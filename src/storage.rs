@@ -443,7 +443,7 @@ impl Tree {
         }
         return None
     }
-    pub fn get(&self, key: Vec<u8>) -> Option<Vec<u8>> {
+    pub fn get(&self, key: &Vec<u8>) -> Option<Vec<u8>> {
         if let Some(value) = self.memtable.skipmap.get(&key) {
             return Some(value.value().to_vec());
         }
@@ -585,7 +585,20 @@ impl Tree {
 
 // testing only
 // need to get test suite going
+// haha print does not flush
+// reminds me of the good ole days
 fn main() {
+    println!("hi");
     let mut tree = Tree::new("./yadb");
+    println!("hello");
     tree.init();
+    let res = tree.get("test".as_bytes());
+    if res.is_none() {
+        println!("Nothing");
+    } else {
+        println!("something is very wrong");
+    }
+    tree.put("test".as_bytes(), "test_value".as_bytes());
+
+    
 }
