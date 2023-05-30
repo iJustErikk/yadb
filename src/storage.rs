@@ -444,7 +444,7 @@ impl Tree {
         return None
     }
     pub fn get(&self, key: &Vec<u8>) -> Option<Vec<u8>> {
-        if let Some(value) = self.memtable.skipmap.get(&key) {
+        if let Some(value) = self.memtable.skipmap.get(key) {
             return Some(value.value().to_vec());
         }
         for level in 0..self.num_levels.unwrap() {
@@ -538,8 +538,10 @@ impl Tree {
 
 
         fs::remove_file(self.path.clone().join("wal"))?;
+        println!("we get here");
 
         self.wal_file = Some(File::create(self.path.clone().join("wal")).unwrap());
+        println!("{}", self.wal_file.is_none());
 
         Ok(())
     }
@@ -592,13 +594,13 @@ fn main() {
     let mut tree = Tree::new("./yadb");
     println!("hello");
     tree.init();
-    let res = tree.get("test".as_bytes());
+    let res = tree.get(&("test".as_bytes().to_vec()));
     if res.is_none() {
         println!("Nothing");
     } else {
         println!("something is very wrong");
     }
-    tree.put("test".as_bytes(), "test_value".as_bytes());
+    tree.put(&("test".as_bytes().to_vec()), &("test_value".as_bytes().to_vec()));
 
     
 }
