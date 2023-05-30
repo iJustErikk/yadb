@@ -17,6 +17,8 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{self};
 use std::convert::TryFrom;
 
+use std::cmp::Ord;
+
 extern crate crossbeam_skiplist;
 use crossbeam_skiplist::SkipMap;
 
@@ -117,6 +119,7 @@ impl fmt::Display for InvalidDatabaseStateError {
         }
     }
 }
+
 
 impl Error for InvalidDatabaseStateError {}
 
@@ -380,7 +383,9 @@ impl Tree {
             }
         }
         Ok(())
+
     }
+    // TODO: allow user to supply custom comparators
     // returns the bucket a key is potentially inside
     // each bucket i is [start key at i, start key at i + 1)
     // binary search over i
@@ -398,9 +403,9 @@ impl Tree {
     // if key < index_keys[mid] -> cuts right half (keeps mid's block), very much still in there
     // if key >= index_keys[mid + 1] -> cuts left half -> left half is known to be less
     // these maintain our containing invariant so this is correct
-    fn search_index(self, index: &Index, key: Vec<u8>) -> Option<i64> {
+    fn search_index(&self, index: &Index, key: &Vec<u8>) -> Option<i64> {
         // TODO: do these comparators actl work?
-        if key < index.entries[0].0 {
+        if key < &index.entries[0].0 {
             return None
         }
         let mut left = 0;
@@ -408,12 +413,12 @@ impl Tree {
         loop {
             let mid = (left + right) / 2;
             if mid == index.entries.len() - 1 {
-                assert!(key >= index.entries[index.entries.len() - 1].0);
+                assert!(key >= &index.entries[index.entries.len() - 1].0);
                 return Some(mid as i64);
             }
-            if key < index.entries[mid].0 {
+            if key < &index.entries[mid].0 {
                 right = mid;
-            } else if key >= index.entries[mid + 1].0  {
+            } else if key >= &index.entries[mid + 1].0  {
                 left = mid + 1;
             } else {
                 // if key > start && < end -> in bucket
@@ -421,10 +426,10 @@ impl Tree {
             }
         }
     }
-    fn search_table(&self, level: usize, table: u8, key: Vec<u8>) -> Option<&Vec<u8>> {
+    fn search_table(&self, level: usize, table: u8, key: &Vec<u8>) -> Option<Vec<u8>> {
         // not checking bloom filter yet
         let mut table = File::open(self.path.clone().join(level.to_string()).join(table.to_string())).unwrap();
-        let index = Index::deserialize(table).unwrap();
+        let index = Index::deserialize(&table).unwrap();
         let block_num = self.search_index(&index, key);
         if block_num.is_none() {
             return None;
@@ -432,23 +437,22 @@ impl Tree {
         table.seek(SeekFrom::Current(block_num.unwrap()));
         let block = DataBlock::deserialize(&mut table).unwrap();
         for (cantidate_key, value) in block.entries {
-            if cantidate_key == key {
-                // should pair these, dunno why I have them separate
-                return Some(&value);
+            if &cantidate_key == key {
+                return Some(value);
             }
         }
         return None
     }
-    pub fn get(&self, key: Vec<u8>) -> Option<&Vec<u8>> {
+    pub fn get(&self, key: Vec<u8>) -> Option<Vec<u8>> {
         if let Some(value) = self.memtable.skipmap.get(&key) {
-            return Some(value.value());
+            return Some(value.value().to_vec());
         }
         for level in 0..self.num_levels.unwrap() {
             for sstable in (0..self.tables_per_level.unwrap()[level]).rev() {
-                // If your search_table() function returns Option<Vec<u8>>, you can return it directly.
-                // You need to implement the function search_table()
                 // TODO: if value vector is empty, this is a tombstone
-                return self.search_table(level, sstable, key);
+                if let Some(res) = self.search_table(level, sstable, &key) {
+                    return Some(res);
+                }
             }
         }
         return None;
@@ -498,7 +502,7 @@ impl Tree {
         table.sync_data().unwrap();
     }
 
-    fn append_to_wal(&mut self, entry: &WALEntry) {
+    fn append_to_wal(&mut self, entry: WALEntry) {
         entry.serialize(&mut (self.wal_file.as_mut().unwrap()));
         // wal metadata should not change, so sync_data is fine to use, instead of sync_all/fsync
         self.wal_file.as_mut().unwrap().sync_data();
@@ -540,16 +544,18 @@ impl Tree {
         Ok(())
     }
 
-    fn add_walentry(&mut self, entry: WALEntry) {
-        let old_size = if self.memtable.skipmap.contains_key(&entry.key) { entry.key.len() + self.memtable.skipmap.get(&entry.key).unwrap().value().len()} else { 0};
-        let new_size = entry.key.len() + entry.value.len();
+    fn add_walentry(&mut self, operation: Operation, key: &Vec<u8>, value: &Vec<u8>) {
+        let old_size = if self.memtable.skipmap.contains_key(key) { key.len() + self.memtable.skipmap.get(key).unwrap().value().len()} else { 0};
+        let new_size = key.len() + value.len();
         self.memtable.size += new_size - old_size;
-        if entry.operation == Operation::PUT {
-            self.memtable.skipmap.insert(entry.key, entry.value);
-        } else if entry.operation == Operation::DELETE {
-            self.memtable.skipmap.remove(&entry.key);
+        // TODO: too many copies- this may need to be optimized
+        if operation == Operation::PUT {
+            self.memtable.skipmap.insert(key.to_vec(), value.to_vec());
+        } else if operation == Operation::DELETE {
+            self.memtable.skipmap.remove(key);
         }
-        self.append_to_wal(&entry);
+
+        self.append_to_wal(WALEntry { operation, key: key.to_vec(), value: value.to_vec() });
         // TODO: no magic values
         // add config setting
         if self.memtable.size > 1_000_000 {
@@ -558,13 +564,13 @@ impl Tree {
         }
     }
 
-    pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) {
-        self.add_walentry(WALEntry{operation: Operation::PUT, key, value});
+    pub fn put(&mut self, key: &Vec<u8>, value: &Vec<u8>) {
+        self.add_walentry(Operation::PUT, key, value);
     }
 
-    pub fn delete(&mut self, key: Vec<u8>) {
+    pub fn delete(&mut self, key: &Vec<u8>) {
         // empty value is tombstone
-        self.add_walentry(WALEntry{operation: Operation::DELETE, key, value: Vec::new()});
+        self.add_walentry(Operation::DELETE, key, &Vec::new());
     }
 }
 
