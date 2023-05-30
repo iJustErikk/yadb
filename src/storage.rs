@@ -270,8 +270,8 @@ struct Memtable {
 // that folder will contain a header file, a WAL file named wal and folders 0, 1, 2, 3... containing corresponing levels of sstables
 // those folders will contain files named 0, 1, 2, 3... containing sstables of increasing recency
 impl Tree {
-    pub fn new(path: PathBuf) -> Self{
-        return Tree {num_levels: None, wal_file: None, tables_per_level: None, path, memtable: Memtable{skipmap: SkipMap::new(), size: 0}};
+    pub fn new(path: &str) -> Self{
+        return Tree {num_levels: None, wal_file: None, tables_per_level: None, path: PathBuf::from(path), memtable: Memtable{skipmap: SkipMap::new(), size: 0}};
     }
     pub fn init(&mut self) -> Result<(), Box<dyn Error>> {
         self.init_folder()?;
@@ -583,4 +583,9 @@ impl Tree {
 // could compact in another thread
 // batch io
 
-fn main() {}
+// testing only
+// need to get test suite going
+fn main() {
+    let mut tree = Tree::new("./yadb");
+    tree.init();
+}
