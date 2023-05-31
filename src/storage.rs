@@ -16,7 +16,7 @@ extern crate byteorder;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{self};
 use std::convert::TryFrom;
-
+use std::string;
 use std::cmp::Ord;
 
 extern crate crossbeam_skiplist;
@@ -275,9 +275,12 @@ impl Tree {
     }
     pub fn init(&mut self) -> Result<(), Box<dyn Error>> {
         self.init_folder()?;
+
         self.cleanup_uncommitted()?;
+
         self.general_sanity_check()?;
-        self.restore_wal();
+
+        self.restore_wal()?;
         Ok(())
     }
     fn init_folder(&mut self) -> Result<(), Box<dyn Error>> {
@@ -290,7 +293,8 @@ impl Tree {
             self.tables_per_level = Some(buffer);
             let mut header = File::create(self.path.clone().join("header"))?;
             header.write_all(&buffer)?;
-            File::create(self.path.clone().join("wal"))?;
+            self.wal_file = Some(File::create(self.path.clone().join("wal")).unwrap());
+
             
         } else {
             let mut buffer = [0; 5];
@@ -299,6 +303,8 @@ impl Tree {
             // if this fails, alert the user with InvalidDatabaseStateError, corrupted header
             file.read_exact(&mut buffer)?;
             self.tables_per_level = Some(buffer);
+            self.wal_file = Some(File::open(self.path.clone().join("wal")).unwrap());
+
         }
         Ok(())
     }
@@ -325,6 +331,7 @@ impl Tree {
     }
 
     fn general_sanity_check(&mut self) -> Result<(), Box<dyn Error>> {
+
         // any folder should be 0 - 4
         // any file in those folders should be numeric
         // # of sstables should match header
@@ -336,8 +343,10 @@ impl Tree {
         // stuff is getting initialized in too many places...is there a better way to do this?
         self.num_levels = Some(num_levels);
         for entry_result in fs::read_dir(&self.path)? {
+
             let entry = entry_result?;
             if entry.file_type()?.is_dir() {
+
                 let level = match entry.file_name().into_string().unwrap().parse::<u8>() {
                     Ok(value) => Ok(value),
                     Err(_) => Err(InvalidDatabaseStateError::UnexpectedUserFolder{folderpath: entry.file_name().into_string().unwrap()})
@@ -353,6 +362,7 @@ impl Tree {
                     fs::remove_dir_all(entry.path())?;
                     continue;
                 }
+
                 // let's count sstables
                 // let's assume that if the filename is valid, then it is a valid sstable
                 // could do serialization/corruption checks with checksum
@@ -378,10 +388,11 @@ impl Tree {
                 if actual != expected {
                     return Err(InvalidDatabaseStateError::SSTableMismatch{expected, actual})?;
                 }
-            } else if entry.file_type()?.is_file() && (entry.file_name() != "header" || entry.file_name() != "wal") {
+            } else if entry.file_type()?.is_file() && (entry.file_name() != "header" && entry.file_name() != "wal") {
                 return Err(InvalidDatabaseStateError::UnexpectedUserFile{filepath: entry.path().into_os_string().into_string().unwrap()})?;
             }
         }
+
         Ok(())
 
     }
@@ -464,9 +475,18 @@ impl Tree {
     // start calling compaction
     
     fn write_skipmap_as_sstable(&self, skipmap: &SkipMap<Vec<u8>, Vec<u8>>) {
+        if skipmap.len() == 0 {
+            return;
+        }
         // todo: compaction
         let table_to_write = self.tables_per_level.unwrap()[0];
+        // todo: create "filetrnsactionwriter"
+        // before writing, FTW will create a uncommitted file
+        // once done writing, FTW will rename to committed name
         let filename = format!("uncommitted{}", table_to_write.to_string());
+        if !self.path.join("0").exists() {
+            fs::create_dir(self.path.join("0")).unwrap();
+        }
         let mut table = File::create(self.path.join("0").join(&filename)).unwrap();
 
         let mut index: Vec<u8> = Vec::new();
@@ -538,10 +558,8 @@ impl Tree {
 
 
         fs::remove_file(self.path.clone().join("wal"))?;
-        println!("we get here");
 
         self.wal_file = Some(File::create(self.path.clone().join("wal")).unwrap());
-        println!("{}", self.wal_file.is_none());
 
         Ok(())
     }
@@ -589,18 +607,15 @@ impl Tree {
 // need to get test suite going
 // haha print does not flush
 // reminds me of the good ole days
-fn main() {
-    println!("hi");
+fn main() -> Result<(), Box<dyn Error>> {
     let mut tree = Tree::new("./yadb");
-    println!("hello");
-    tree.init();
-    let res = tree.get(&("test".as_bytes().to_vec()));
-    if res.is_none() {
-        println!("Nothing");
+    tree.init()?;
+    if let Some(res) = tree.get(&("test".as_bytes().to_vec())) {
+        println!("{}", string::String::from_utf8(res).unwrap());
     } else {
-        println!("something is very wrong");
+        println!("nothing?");
     }
-    tree.put(&("test".as_bytes().to_vec()), &("test_value".as_bytes().to_vec()));
-
     
+    tree.put(&("test".as_bytes().to_vec()), &("test_value".as_bytes().to_vec()));
+    Ok(())
 }
