@@ -5,6 +5,9 @@ use std::io::Cursor;
 use std::io::Seek;
 use std::io::SeekFrom;
 use fs::File;
+use std::fs::OpenOptions;
+use std::io::prelude::*;
+
 use fs::remove_file;
 use std::path::PathBuf;
 use std::error::Error;
@@ -291,6 +294,8 @@ impl Tree {
             fs::create_dir_all(&self.path)?;
             let buffer = [0; 5];
             self.tables_per_level = Some(buffer);
+
+            // TODO: only create if it does not exist (it will truncate)
             let mut header = File::create(self.path.clone().join("header"))?;
             header.write_all(&buffer)?;
             self.wal_file = Some(File::create(self.path.clone().join("wal")).unwrap());
@@ -480,9 +485,6 @@ impl Tree {
         }
         // todo: compaction
         let table_to_write = self.tables_per_level.unwrap()[0];
-        // todo: create "filetrnsactionwriter"
-        // before writing, FTW will create a uncommitted file
-        // once done writing, FTW will rename to committed name
         let filename = format!("uncommitted{}", table_to_write.to_string());
         if !self.path.join("0").exists() {
             fs::create_dir(self.path.join("0")).unwrap();
@@ -518,8 +520,10 @@ impl Tree {
         table.write_all(&data_section).unwrap();
         let old_path = self.path.join("0").join(&filename);
         let new_path = self.path.join("0").join(table_to_write.to_string());
+        // before we commit the table, update header
+        // 
         std::fs::rename(old_path, new_path).unwrap();
-        table.sync_data().unwrap();
+        table.sync_all().unwrap();
     }
 
     fn append_to_wal(&mut self, entry: WALEntry) {
@@ -581,6 +585,8 @@ impl Tree {
         if self.memtable.size > 1_000_000 {
             self.write_skipmap_as_sstable(&self.memtable.skipmap);
             self.memtable.skipmap = SkipMap::new();
+            fs::remove_file(self.path.clone().join("wal")).unwrap();
+            self.wal_file = Some(File::create(self.path.clone().join("wal")).unwrap());
         }
     }
 
