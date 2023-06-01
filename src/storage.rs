@@ -295,7 +295,7 @@ impl Tree {
             let buffer = [0; 5];
             self.tables_per_level = Some(buffer);
 
-            // TODO: only create if it does not exist (it will truncate)
+            // create is fine, no file to truncate
             let mut header = File::create(self.path.clone().join("header"))?;
             header.write_all(&buffer)?;
             self.wal_file = Some(File::create(self.path.clone().join("wal")).unwrap());
@@ -308,8 +308,12 @@ impl Tree {
             // if this fails, alert the user with InvalidDatabaseStateError, corrupted header
             file.read_exact(&mut buffer)?;
             self.tables_per_level = Some(buffer);
-            self.wal_file = Some(File::open(self.path.clone().join("wal")).unwrap());
-
+            
+            self.wal_file = Some(OpenOptions::new()
+            .write(false)
+            .append(true)
+            .open(self.path.clone().join("wal"))
+            .unwrap());
         }
         Ok(())
     }
@@ -521,7 +525,8 @@ impl Tree {
         let old_path = self.path.join("0").join(&filename);
         let new_path = self.path.join("0").join(table_to_write.to_string());
         // before we commit the table, update header
-        // 
+        self.tables_per_level.unwrap()[0] += 1;
+        fs::write(self.path.join("header"), self.tables_per_level.unwrap()).unwrap();
         std::fs::rename(old_path, new_path).unwrap();
         table.sync_all().unwrap();
     }
@@ -534,6 +539,7 @@ impl Tree {
 
     fn restore_wal(&mut self) -> Result<(), io::Error> {
         let mut entries = Vec::new();
+        assert!(self.path.join("wal").exists());
         loop {
             match WALEntry::deserialize(&mut (self.wal_file.as_mut().unwrap())) {
                 Ok(entry) => entries.push(entry),
