@@ -452,6 +452,7 @@ impl Tree {
         }
     }
     fn search_table(&self, level: usize, table: u8, key: &Vec<u8>) -> Option<Vec<u8>> {
+        println!("{} {}", level, table);
         // not checking bloom filter yet
         let mut table = File::open(self.path.clone().join(level.to_string()).join(table.to_string())).unwrap();
         let index = Index::deserialize(&table).unwrap();
@@ -488,8 +489,8 @@ impl Tree {
     // convert skipmap to sstable
     // start calling compaction
     
-    fn write_skipmap_as_sstable(&self, skipmap: &SkipMap<Vec<u8>, Vec<u8>>) {
-        if skipmap.len() == 0 {
+    fn write_skipmap_as_sstable(&mut self) {
+        if self.memtable.skipmap.len() == 0 {
             return;
         }
         // todo: compaction
@@ -498,6 +499,9 @@ impl Tree {
         if !self.path.join("0").exists() {
             fs::create_dir(self.path.join("0")).unwrap();
         }
+        // we better not be overwriting something
+        // otherwise we are shooting ourselves in the foot
+        assert!(!self.path.join("0").join(&filename).exists());
         let mut table = File::create(self.path.join("0").join(&filename)).unwrap();
 
         let mut index: Vec<u8> = Vec::new();
@@ -505,7 +509,7 @@ impl Tree {
         let mut current_block: Vec<u8> = Vec::new();
         let mut keys_visited = 0;
         
-        for entry in skipmap {
+        for entry in &self.memtable.skipmap {
             let key = entry.key();
             let value = entry.value();
             keys_visited += 1;
@@ -518,7 +522,7 @@ impl Tree {
             current_block.extend(key);
             current_block.write_u64::<LittleEndian>(value.len() as u64).unwrap();
             current_block.extend(value);
-            if current_block.len() > 4_000 || keys_visited == skipmap.len() {
+            if current_block.len() > 4_000 || keys_visited == self.memtable.skipmap.len() {
                 data_section.write_u64::<LittleEndian>(current_block.len() as u64).unwrap();
                 data_section.append(&mut current_block);
             }
@@ -530,7 +534,9 @@ impl Tree {
         let old_path = self.path.join("0").join(&filename);
         let new_path = self.path.join("0").join(table_to_write.to_string());
         // before we commit the table, update header
-        self.tables_per_level.unwrap()[0] += 1;
+        println!("before tables {}", self.tables_per_level.unwrap()[0]);
+        self.tables_per_level.as_mut().unwrap()[0] += 1;
+        println!("new tables {}", self.tables_per_level.unwrap()[0]);
         fs::write(self.path.join("header"), self.tables_per_level.unwrap()).unwrap();
         std::fs::rename(old_path, new_path).unwrap();
         table.sync_all().unwrap();
@@ -570,10 +576,15 @@ impl Tree {
             }
         };
 
-        self.write_skipmap_as_sstable(&skipmap);
+        self.memtable.skipmap = skipmap;
+
+        self.write_skipmap_as_sstable();
         // wal file persisted, truncate
         self.wal_file.as_mut().unwrap().set_len(0).unwrap();
+        
         self.wal_file.as_mut().unwrap().sync_all().unwrap();
+
+        println!("hello");
         
 
         Ok(())
@@ -594,7 +605,7 @@ impl Tree {
         // TODO: no magic values
         // add config setting
         if self.memtable.size > 1_000_000 {
-            self.write_skipmap_as_sstable(&self.memtable.skipmap);
+            self.write_skipmap_as_sstable();
             self.memtable.skipmap = SkipMap::new();
             // wal persisted, truncate now
             self.wal_file.as_mut().unwrap().set_len(0).unwrap();
