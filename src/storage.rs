@@ -168,17 +168,40 @@ impl TryFrom<u8> for Operation {
 struct Index {
     entries: Vec<(Vec<u8>, u64)>,
 }
+// index grows linearly with sstable data
+// index has a key for each ~4kb block
+// if we have 1tb of data
+// then we have ~256m keys in the index
+// that is at least 1gb memory
+// that needs to be optimized, otherwise we have a hard limit
+// also loading 1gb into memory is horrifically slow
+// could also present ram starvation if done in parallel
+// since index could not be read entirely into memory at that size
+// checksums would be hard
+// what is the max size?
+// I could turn compaction off for top level if it become full
+// what is the max size again? 1st level 10mb + 2nd 100mb + 3rd 1 gb + 4th 10gb + 5th 100gb ~< 200gb
+// so the largest table would be ~ 10gb
+// ~2.5 million keys in sparse index
+// way less than 1gb in memory
 impl Index {
     pub fn deserialize<R: Read>(mut reader: R) -> Result<Index, Box<dyn Error>> {
         let mut entries = Vec::new();
-        
-        // TODO: what was I thinking?
-        // we should have the total # of bytes
-        // instead of keeping reading bytes
-        while let Ok(key_size) = reader.read_u64::<LittleEndian>() {
+        // for now, just store the length here
+        // but, when we get to compaction
+        // we won't know the length of the data or index before we start writing them
+        // as they are not in memory
+        // why not store this in the header?
+        // we have at most 50 tables, so storing more data there will still be atomic within a single write
+        let index_size = reader.read_u64::<LittleEndian>().unwrap();
+        let mut bytes_read = 0;
+        while bytes_read != index_size {
+            let key_size = reader.read_u64::<LittleEndian>().unwrap();
             let mut key = vec![0; key_size as usize];
             reader.read_exact(&mut key)?;
             let offset = reader.read_u64::<LittleEndian>()?;
+            let u64_num_bytes = 8;
+            bytes_read += 2 * u64_num_bytes + key_size;
             entries.push((key, offset));
         }
     
@@ -531,7 +554,6 @@ impl Tree {
                 data_section.append(&mut current_block);
             }
         }
-        
         table.write_u64::<LittleEndian>(index.len() as u64).unwrap();
         table.write_all(&index).unwrap();
         table.write_all(&data_section).unwrap();
