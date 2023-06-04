@@ -6,7 +6,6 @@ use std::io::Seek;
 use std::io::SeekFrom;
 use fs::File;
 use std::fs::OpenOptions;
-use std::io::prelude::*;
 
 use fs::remove_file;
 use std::path::PathBuf;
@@ -20,7 +19,6 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{self};
 use std::convert::TryFrom;
 use std::string;
-use std::cmp::Ord;
 
 extern crate crossbeam_skiplist;
 use crossbeam_skiplist::SkipMap;
@@ -244,6 +242,7 @@ impl WALEntry {
         reader.read_exact(&mut value)?;
         let mut newline = [0; 1];
         reader.read_exact(&mut newline)?;
+        
         // if newline[0] != b'\n' {
         //     return Err(InvalidDatabaseStateError::CorruptWalEntry)?;
         // }
@@ -298,7 +297,13 @@ impl Tree {
             // create is fine, no file to truncate
             let mut header = File::create(self.path.clone().join("header"))?;
             header.write_all(&buffer)?;
-            self.wal_file = Some(File::create(self.path.clone().join("wal")).unwrap());
+            self.wal_file = Some(OpenOptions::new()
+            .read(true)
+            .write(true)
+            .append(true)
+            .create(true)
+            .open(self.path.clone().join("wal"))
+            .unwrap());
 
             
         } else {
@@ -308,9 +313,9 @@ impl Tree {
             // if this fails, alert the user with InvalidDatabaseStateError, corrupted header
             file.read_exact(&mut buffer)?;
             self.tables_per_level = Some(buffer);
-            
             self.wal_file = Some(OpenOptions::new()
-            .write(false)
+            .read(true)
+            .write(true)
             .append(true)
             .open(self.path.clone().join("wal"))
             .unwrap());
@@ -532,9 +537,9 @@ impl Tree {
     }
 
     fn append_to_wal(&mut self, entry: WALEntry) {
-        entry.serialize(&mut (self.wal_file.as_mut().unwrap()));
+        entry.serialize(&mut (self.wal_file.as_mut().unwrap())).unwrap();
         // wal metadata should not change, so sync_data is fine to use, instead of sync_all/fsync
-        self.wal_file.as_mut().unwrap().sync_data();
+        self.wal_file.as_mut().unwrap().sync_data().unwrap();
     }
 
     fn restore_wal(&mut self) -> Result<(), io::Error> {
@@ -545,6 +550,7 @@ impl Tree {
                 Ok(entry) => entries.push(entry),
                 Err(e) => {
                     if e.kind() == io::ErrorKind::UnexpectedEof {
+                        println!("this happens");
                         break;
                     } else {
                         return Err(e);
@@ -554,7 +560,7 @@ impl Tree {
         }
         
 
-        let mut skipmap = SkipMap::new();
+        let skipmap = SkipMap::new();
 
         for entry in entries {
             match entry.operation {
@@ -565,11 +571,10 @@ impl Tree {
         };
 
         self.write_skipmap_as_sstable(&skipmap);
-
-
-        fs::remove_file(self.path.clone().join("wal"))?;
-
-        self.wal_file = Some(File::create(self.path.clone().join("wal")).unwrap());
+        // wal file persisted, truncate
+        self.wal_file.as_mut().unwrap().set_len(0).unwrap();
+        self.wal_file.as_mut().unwrap().sync_all().unwrap();
+        
 
         Ok(())
     }
@@ -591,8 +596,9 @@ impl Tree {
         if self.memtable.size > 1_000_000 {
             self.write_skipmap_as_sstable(&self.memtable.skipmap);
             self.memtable.skipmap = SkipMap::new();
-            fs::remove_file(self.path.clone().join("wal")).unwrap();
-            self.wal_file = Some(File::create(self.path.clone().join("wal")).unwrap());
+            // wal persisted, truncate now
+            self.wal_file.as_mut().unwrap().set_len(0).unwrap();
+            self.wal_file.as_mut().unwrap().sync_all().unwrap();
         }
     }
 
