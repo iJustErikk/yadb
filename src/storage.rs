@@ -540,6 +540,7 @@ impl Tree {
         fs::write(self.path.join("header"), self.tables_per_level.unwrap()).unwrap();
         std::fs::rename(old_path, new_path).unwrap();
         table.sync_all().unwrap();
+        self.memtable.skipmap = SkipMap::new();
     }
 
     fn append_to_wal(&mut self, entry: WALEntry) {
