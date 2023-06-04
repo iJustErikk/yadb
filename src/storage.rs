@@ -172,6 +172,9 @@ impl Index {
     pub fn deserialize<R: Read>(mut reader: R) -> Result<Index, Box<dyn Error>> {
         let mut entries = Vec::new();
         
+        // TODO: what was I thinking?
+        // we should have the total # of bytes
+        // instead of keeping reading bytes
         while let Ok(key_size) = reader.read_u64::<LittleEndian>() {
             let mut key = vec![0; key_size as usize];
             reader.read_exact(&mut key)?;
@@ -460,7 +463,7 @@ impl Tree {
         if block_num.is_none() {
             return None;
         }
-        table.seek(SeekFrom::Current(block_num.unwrap()));
+        table.seek(SeekFrom::Current(block_num.unwrap())).unwrap();
         let block = DataBlock::deserialize(&mut table).unwrap();
         for (cantidate_key, value) in block.entries {
             if &cantidate_key == key {
@@ -476,6 +479,7 @@ impl Tree {
         for level in 0..self.num_levels.unwrap() {
             for sstable in (0..self.tables_per_level.unwrap()[level]).rev() {
                 // TODO: if value vector is empty, this is a tombstone
+                println!("{} {} sanity", level, sstable);
                 if let Some(res) = self.search_table(level, sstable, &key) {
                     return Some(res);
                 }
@@ -585,7 +589,7 @@ impl Tree {
         
         self.wal_file.as_mut().unwrap().sync_all().unwrap();
 
-        println!("hello");
+
         
 
         Ok(())
