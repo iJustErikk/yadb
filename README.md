@@ -11,7 +11,7 @@ Lofty goals for this project:
 - Build lsm based kv store
 - Build distributed sql database (with simple sql, maybe fuller sql syntax for non-distributed databases) like Cockroachdb
 - Build event streaming tool like Kafka on top of the KV store
-- (possibly) build b minus tree kv store (a tree structure with amazingly minimal r/w amplification)
+- (possibly) build b epsilon storage engine
 
 storage engine:
 This is a lsm tree supporting (that will support) level compaction and bloom filters. The user will be able to tune some settings for their workloads. Working on getting this working. Next is cleaning up the config/API/error handling and writing some tests.
