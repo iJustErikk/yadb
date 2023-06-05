@@ -220,19 +220,19 @@ struct DataBlock {
 
 impl DataBlock {
     pub fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
-        let block_size = reader.read_u8()?;
+        let block_size = reader.read_u64::<LittleEndian>()?;
         let mut block = vec![0; block_size as usize];
         reader.read_exact(&mut block)?;
         let block_len = block.len();
         let mut cursor = Cursor::new(block);
         let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         while (cursor.position() as usize) < block_len {
-            let key_size = cursor.read_u8()?;
+            let key_size = cursor.read_u64::<LittleEndian>()?;
             let mut key = vec![0; key_size as usize];
             cursor.read_exact(&mut key)?;
 
 
-            let value_size = cursor.read_u8()?;
+            let value_size = cursor.read_u64::<LittleEndian>()?;
             let mut value = vec![0; value_size as usize];
             cursor.read_exact(&mut value)?;
             entries.push((key, value));
@@ -459,6 +459,7 @@ impl Tree {
         if key < &index.entries[0].0 {
             return None
         }
+        
         let mut left = 0;
         let mut right = index.entries.len() - 1;
         loop {
@@ -499,6 +500,7 @@ impl Tree {
         if let Some(value) = self.memtable.skipmap.get(key) {
             return Some(value.value().to_vec());
         }
+        println!("{} {}", self.num_levels.unwrap(), self.tables_per_level.unwrap()[0]);
         for level in 0..self.num_levels.unwrap() {
             for sstable in (0..self.tables_per_level.unwrap()[level]).rev() {
                 // TODO: if value vector is empty, this is a tombstone
@@ -562,6 +564,9 @@ impl Tree {
         // before we commit the table, update header
         println!("before tables {}", self.tables_per_level.unwrap()[0]);
         self.tables_per_level.as_mut().unwrap()[0] += 1;
+        if self.num_levels.unwrap() == 0 {
+            self.num_levels = Some(1);
+        }
         println!("new tables {}", self.tables_per_level.unwrap()[0]);
         fs::write(self.path.join("header"), self.tables_per_level.unwrap()).unwrap();
         std::fs::rename(old_path, new_path).unwrap();
