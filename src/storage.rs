@@ -479,7 +479,6 @@ impl Tree {
         }
     }
     fn search_table(&self, level: usize, table: u8, key: &Vec<u8>) -> Option<Vec<u8>> {
-        println!("{} {}", level, table);
         // not checking bloom filter yet
         let mut table = File::open(self.path.clone().join(level.to_string()).join(table.to_string())).unwrap();
         let index = Index::deserialize(&table).unwrap();
@@ -508,7 +507,6 @@ impl Tree {
         for level in 0..self.num_levels.unwrap() {
             for sstable in (0..self.tables_per_level.unwrap()[level]).rev() {
                 // TODO: if value vector is empty, this is a tombstone
-                println!("{} {} sanity", level, sstable);
                 if let Some(res) = self.search_table(level, sstable, &key) {
                     // empty length vector is tombstone
                     // clients cannot write an empty length value
@@ -636,7 +634,9 @@ impl Tree {
     fn add_walentry(&mut self, operation: Operation, key: &Vec<u8>, value: &Vec<u8>) {
         let old_size = if self.memtable.skipmap.contains_key(key) { key.len() + self.memtable.skipmap.get(key).unwrap().value().len()} else { 0};
         let new_size = key.len() + value.len();
-        self.memtable.size += new_size - old_size;
+        // split these up, as adding the difference causes overflow on deletes
+        self.memtable.size += new_size;
+        self.memtable.size -= old_size;
         // TODO: too many copies- this may need to be optimized
         if operation == Operation::PUT {
             self.memtable.skipmap.insert(key.to_vec(), value.to_vec());
