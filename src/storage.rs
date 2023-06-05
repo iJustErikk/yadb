@@ -498,7 +498,11 @@ impl Tree {
     }
     pub fn get(&self, key: &Vec<u8>) -> Option<Vec<u8>> {
         if let Some(value) = self.memtable.skipmap.get(key) {
-            return Some(value.value().to_vec());
+            let res = value.value().to_vec();
+            if res.len() == 0 {
+                return None;
+            }
+            return Some(res);
         }
         println!("{} {}", self.num_levels.unwrap(), self.tables_per_level.unwrap()[0]);
         for level in 0..self.num_levels.unwrap() {
@@ -506,6 +510,12 @@ impl Tree {
                 // TODO: if value vector is empty, this is a tombstone
                 println!("{} {} sanity", level, sstable);
                 if let Some(res) = self.search_table(level, sstable, &key) {
+                    // empty length vector is tombstone
+                    // clients cannot write an empty length value
+                    // is this limiting?
+                    if res.len() == 0 {
+                        return None;
+                    }
                     return Some(res);
                 }
             }
@@ -603,7 +613,8 @@ impl Tree {
         for entry in entries {
             match entry.operation {
                 Operation::PUT => { skipmap.insert(entry.key, entry.value); }
-                Operation::DELETE => { skipmap.remove(&entry.key); }
+                // empty vector is tombstone
+                Operation::DELETE => { skipmap.insert(entry.key, Vec::new()); }
                 _ => {}
             }
         };
@@ -630,7 +641,7 @@ impl Tree {
         if operation == Operation::PUT {
             self.memtable.skipmap.insert(key.to_vec(), value.to_vec());
         } else if operation == Operation::DELETE {
-            self.memtable.skipmap.remove(key);
+            self.memtable.skipmap.insert(key.to_vec(), Vec::new());
         }
 
         self.append_to_wal(WALEntry { operation, key: key.to_vec(), value: value.to_vec() });
@@ -646,6 +657,8 @@ impl Tree {
     }
 
     pub fn put(&mut self, key: &Vec<u8>, value: &Vec<u8>) {
+        // empty length value is tombstone
+        assert!(value.len() != 0);
         self.add_walentry(Operation::PUT, key, value);
     }
 
@@ -678,5 +691,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     
     tree.put(&("test".as_bytes().to_vec()), &("test_value".as_bytes().to_vec()));
+    tree.delete(&("test".as_bytes().to_vec()));
+    
     Ok(())
 }
