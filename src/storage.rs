@@ -695,3 +695,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     
     Ok(())
 }
+
+/* Things to test:
+persistence happens through one of three ways: memtable flush, wal restoration, compaction
+should test g/p/d in each of those scenarios
+should test key being in middle of datablock
+should test binary search function
+key found in nonfirst datablock
+
+test compaction?
+think of more
+
+
+ */
