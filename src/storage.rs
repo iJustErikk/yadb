@@ -703,8 +703,26 @@ should test key being in middle of datablock
 should test binary search function
 key found in nonfirst datablock
 
+empty k/v
+super long k/v
+
 test compaction?
+
+out of space
+test recovery - there are so many places this can fail (HOW CAN I MAKE THIS FAIL? I DON'T WANT TO MOCK 1000 FS calls)
+^^ don't, just propogate to client code. rust analyzer will make sure no result goes unhandled
+performance
+
+big honking test
+
+fuzz testing
 think of more
+
+future tests:
+concurrency
+merge operator
+custom comparator
+(different compaction strategies?)
 
 
  */
