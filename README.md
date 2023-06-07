@@ -9,8 +9,9 @@ Motivation: I wish to better my system and data engineering skills. Data intensi
 
 Lofty goals for this project: 
 - Build lsm based kv store
+- Build distributed kv engine
+- Build single node sql database
 - Build distributed sql database (with simple sql, maybe fuller sql syntax for non-distributed databases) like Cockroachdb
-- Build event streaming tool like Kafka on top of the KV store
 - (possibly) build b epsilon storage engine
 
 storage engine:
