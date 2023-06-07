@@ -3,7 +3,7 @@ yet another database
 
 making a db. with ~~rocksdb~~ ~~rust~~ ~~go/cockroachdb's pebble.~~ actually going back to rust, writing my own storage engine.
 
-UPDATE: I will return to this shortly. As of now, this does not compile and it likely (surely) has logical errors. Right now I am on a quest to master SQL (beyond simple syntax) and data modeling (sql, nosql, data warehouse).
+Update: this is a tad buggy. working the kinks out.
 
 Motivation: I wish to better my system and data engineering skills. Data intensity will only increase. 
 
