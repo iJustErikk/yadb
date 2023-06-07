@@ -589,7 +589,10 @@ impl Tree {
         // wal metadata should not change, so sync_data is fine to use, instead of sync_all/fsync
         self.wal_file.as_mut().unwrap().sync_data().unwrap();
     }
-
+    
+    // if appending to wal fails on the update of a large k/v, the written wal entry may be partial
+    // if this is the case, we'll have a unexpectedeof and skip that
+    // no harm, as the client would get an error and the value would not be persisted
     fn restore_wal(&mut self) -> Result<(), io::Error> {
         let mut entries = Vec::new();
         assert!(self.path.join("wal").exists());
