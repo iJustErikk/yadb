@@ -485,6 +485,8 @@ impl Tree {
         let block_num = self.search_index(&index, key);
         if block_num.is_none() {
             return None;
+        } else {
+            println!("{}", block_num.unwrap());
         }
         table.seek(SeekFrom::Current(block_num.unwrap())).unwrap();
         let block = DataBlock::deserialize(&mut table).unwrap();
@@ -496,6 +498,7 @@ impl Tree {
         return None
     }
     pub fn get(&self, key: &Vec<u8>) -> Option<Vec<u8>> {
+        assert!(key.len() != 0);
         if let Some(value) = self.memtable.skipmap.get(key) {
             let res = value.value().to_vec();
             if res.len() == 0 {
@@ -503,7 +506,6 @@ impl Tree {
             }
             return Some(res);
         }
-        println!("{} {}", self.num_levels.unwrap(), self.tables_per_level.unwrap()[0]);
         for level in 0..self.num_levels.unwrap() {
             for sstable in (0..self.tables_per_level.unwrap()[level]).rev() {
                 // TODO: if value vector is empty, this is a tombstone
@@ -657,12 +659,14 @@ impl Tree {
     }
 
     pub fn put(&mut self, key: &Vec<u8>, value: &Vec<u8>) {
+        assert!(key.len() != 0);
         // empty length value is tombstone
         assert!(value.len() != 0);
         self.add_walentry(Operation::PUT, key, value);
     }
 
     pub fn delete(&mut self, key: &Vec<u8>) {
+        assert!(key.len() != 0);
         // empty value is tombstone
         self.add_walentry(Operation::DELETE, key, &Vec::new());
     }
@@ -684,14 +688,19 @@ impl Tree {
 fn main() -> Result<(), Box<dyn Error>> {
     let mut tree = Tree::new("./yadb");
     tree.init()?;
-    if let Some(res) = tree.get(&("test".as_bytes().to_vec())) {
-        println!("{}", string::String::from_utf8(res).unwrap());
-    } else {
-        println!("nothing?");
+    println!("init");
+    let repeats = 219;
+    for i in 1..repeats {
+        println!("{}", i);
+        let key = i.to_string();
+        let value = 0.to_string();
+        tree.get(&(key.as_bytes().to_vec()));
+        println!("get");
+        tree.put(&(key.as_bytes().to_vec()), &(value.as_bytes().to_vec()));
+        println!("put");
+        tree.delete(&(key.as_bytes().to_vec()));
+        println!("delete");
     }
-    
-    tree.put(&("test".as_bytes().to_vec()), &("test_value".as_bytes().to_vec()));
-    tree.delete(&("test".as_bytes().to_vec()));
     
     Ok(())
 }
@@ -723,6 +732,5 @@ concurrency
 merge operator
 custom comparator
 (different compaction strategies?)
-
 
  */
