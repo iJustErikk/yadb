@@ -728,6 +728,7 @@ fuzz testing
 think of more
 
 future tests:
+iterators (simple lsm iterator, key order iterator, versioned key order iterator)
 concurrency
 merge operator
 custom comparator
