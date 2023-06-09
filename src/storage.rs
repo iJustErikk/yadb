@@ -268,6 +268,7 @@ impl WALEntry {
         reader.read_exact(&mut value)?;
         let mut newline = [0; 1];
         reader.read_exact(&mut newline)?;
+
         
         // if newline[0] != b'\n' {
         //     return Err(InvalidDatabaseStateError::CorruptWalEntry)?;
@@ -532,6 +533,7 @@ impl Tree {
         if self.memtable.skipmap.len() == 0 {
             return;
         }
+        println!("{}", self.memtable.skipmap.len());
         // todo: compaction
         let table_to_write = self.tables_per_level.unwrap()[0];
         let filename = format!("uncommitted{}", table_to_write.to_string());
@@ -547,7 +549,6 @@ impl Tree {
         let mut data_section: Vec<u8> = Vec::new();
         let mut current_block: Vec<u8> = Vec::new();
         let mut keys_visited = 0;
-        
         for entry in &self.memtable.skipmap {
             let key = entry.key();
             let value = entry.value();
@@ -690,18 +691,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     tree.init()?;
     println!("init");
     let repeats = 219;
+    let skipmap = SkipMap::new();
     for i in 1..repeats {
         println!("{}", i);
         let key = i.to_string();
         let value = 0.to_string();
-        tree.get(&(key.as_bytes().to_vec()));
-        println!("get");
-        tree.put(&(key.as_bytes().to_vec()), &(value.as_bytes().to_vec()));
-        println!("put");
-        tree.delete(&(key.as_bytes().to_vec()));
-        println!("delete");
+        skipmap.insert((key.as_bytes().to_vec()), (value.as_bytes().to_vec()));
+        skipmap.insert((key.as_bytes().to_vec()), (Vec::new()));
     }
-    
+    for entry in &skipmap {
+        let key = entry.key();
+        println!("{}", String::from_utf8_lossy(key));
+    }
     Ok(())
 }
 
@@ -710,7 +711,7 @@ persistence happens through one of three ways: memtable flush, wal restoration, 
 should test g/p/d in each of those scenarios
 should test key being in middle of datablock
 should test binary search function
-key found in nonfirst datablock
+key found in nonfirst datablock - bug
 
 empty k/v
 super long k/v
