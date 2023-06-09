@@ -18,19 +18,9 @@ extern crate byteorder;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{self};
 use std::convert::TryFrom;
-use std::string;
 
 extern crate crossbeam_skiplist;
 use crossbeam_skiplist::SkipMap;
-
-// what we (de)serialize:
-// wal log
-// indexes
-// data blocks
-// ensure that: 
-// - endianness is not an issue
-// - writes and reads agree
-// - leave room for error handling
 
 
 // on tuning bloom filters:
@@ -40,11 +30,6 @@ use crossbeam_skiplist::SkipMap;
 // ^^ this can be the size of the skipmap or easily be calculated during compaction
 // i also would like to avoid rehashing during compaction
 
-// when compacting: how can we avoid 2 passes? (cannot do this completely in memory!)
-// we cannot load everything into memory
-// but we do not know the exact size of the index, so how could we write index/data blocks at same time?
-// need to write them at same time, as we cannot write one before the other
-// could estimate that the new index will be the size of both added together
 
 // solution: make the index go after the datablock
 // compaction algorithm:
@@ -133,23 +118,18 @@ struct Tree {
     memtable: Memtable,
     wal_file: Option<File>
 }
-
-// from rocksdb:
-// Bloom Filter | Index Block | Data Block 1 | Data Block 2 | ... | Data Block N |
-// before each block: the number of bytes for that block (u64)
-// why use sparse index?
-// index gets loaded either way
-// so why not have it list all entries and get the exact block
-// then you do not need keys for data blocks...
-// this had to be more performant in some regard
-// ill benchmark this to see if its really better
+// bloom filter:
+// during compaction:
+// overestimate expected n by summming number of unique keys per table
+// this avoids doing a double read or more robust random sampling (many random IOs)
+// use that n and 1% false positive to find size and number of hash functions
 
 #[derive(Debug)]
 // could provide more ops in future, like the merge operator in pebble/rocksdb
 #[derive(PartialEq)]
 #[derive(Copy, Clone)]
 enum Operation {
-    GET = 0, PUT = 1, DELETE = 2, INVALID = 3 
+    GET = 0, PUT = 1, DELETE = 2
 }
 
 impl TryFrom<u8> for Operation {
@@ -688,7 +668,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut tree = Tree::new("./yadb");
     tree.init()?;
     println!("init");
-    let repeats = 219;
+    let repeats = 1000;
     for i in 1..repeats {
         // println!("{}", i);
         let key = i.to_string();
@@ -700,13 +680,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     
     Ok(())
 }
+// unit tests
+// (try to) test individual functions
+// need to research mocking
+#[cfg(test)]
+mod unit_tests {
+    // use super::*;
 
+    // #[test]
+    // fn test_add_two() {
+    //     assert_eq!(add_two(2), 4);
+    // }
+}
 /* Things to test:
 persistence happens through one of three ways: memtable flush, wal restoration, compaction
 should test g/p/d in each of those scenarios
 should test key being in middle of datablock
 should test binary search function
-key found in nonfirst datablock - bug
+key found in nonfirst datablock
 
 empty k/v
 super long k/v
