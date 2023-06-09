@@ -455,7 +455,7 @@ impl Tree {
     // if key < index_keys[mid] -> cuts right half (keeps mid's block), very much still in there
     // if key >= index_keys[mid + 1] -> cuts left half -> left half is known to be less
     // these maintain our containing invariant so this is correct
-    fn search_index(&self, index: &Index, key: &Vec<u8>) -> Option<i64> {
+    fn search_index(&self, index: &Index, key: &Vec<u8>) -> Option<u64> {
         // TODO: do these comparators actl work?
         if key < &index.entries[0].0 {
             return None
@@ -467,7 +467,7 @@ impl Tree {
             let mid = (left + right) / 2;
             if mid == index.entries.len() - 1 {
                 assert!(key >= &index.entries[index.entries.len() - 1].0);
-                return Some(mid as i64);
+                return Some(mid as u64);
             }
             if key < &index.entries[mid].0 {
                 right = mid;
@@ -475,7 +475,7 @@ impl Tree {
                 left = mid + 1;
             } else {
                 // if key > start && < end -> in bucket
-                return Some(mid as i64);
+                return Some(mid as u64);
             }
         }
     }
@@ -486,10 +486,8 @@ impl Tree {
         let block_num = self.search_index(&index, key);
         if block_num.is_none() {
             return None;
-        } else {
-            println!("{}", block_num.unwrap());
         }
-        table.seek(SeekFrom::Current(block_num.unwrap())).unwrap();
+        table.seek(SeekFrom::Current(index.entries[block_num.unwrap() as usize].1 as i64)).unwrap();
         let block = DataBlock::deserialize(&mut table).unwrap();
         for (cantidate_key, value) in block.entries {
             if &cantidate_key == key {
@@ -590,10 +588,7 @@ impl Tree {
         // wal metadata should not change, so sync_data is fine to use, instead of sync_all/fsync
         self.wal_file.as_mut().unwrap().sync_data().unwrap();
     }
-    
-    // if appending to wal fails on the update of a large k/v, the written wal entry may be partial
-    // if this is the case, we'll have a unexpectedeof and skip that
-    // no harm, as the client would get an error and the value would not be persisted
+
     fn restore_wal(&mut self) -> Result<(), io::Error> {
         let mut entries = Vec::new();
         assert!(self.path.join("wal").exists());
@@ -694,18 +689,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     tree.init()?;
     println!("init");
     let repeats = 219;
-    let skipmap = SkipMap::new();
     for i in 1..repeats {
-        println!("{}", i);
+        // println!("{}", i);
         let key = i.to_string();
         let value = 0.to_string();
-        skipmap.insert((key.as_bytes().to_vec()), (value.as_bytes().to_vec()));
-        skipmap.insert((key.as_bytes().to_vec()), (Vec::new()));
+        tree.get(&(key.as_bytes().to_vec()));
+        tree.put(&(key.as_bytes().to_vec()), &(value.as_bytes().to_vec()));
+        tree.delete(&(key.as_bytes().to_vec()));
     }
-    for entry in &skipmap {
-        let key = entry.key();
-        println!("{}", String::from_utf8_lossy(key));
-    }
+    
     Ok(())
 }
 
@@ -732,7 +724,6 @@ fuzz testing
 think of more
 
 future tests:
-iterators (simple lsm iterator, key order iterator, versioned key order iterator)
 concurrency
 merge operator
 custom comparator

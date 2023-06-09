@@ -18,7 +18,7 @@ path = "src/storage.rs"
 [dependencies]
 log = "0.4.17"
 simplelog = "0.12.1"
-crossbeam-skiplist = "0.1"
+crossbeam-skiplist = "0.1.1"
 sled = "0.34.7"
 byteorder = "1.4.3"
 growable-bloom-filter = "2.0.1"
