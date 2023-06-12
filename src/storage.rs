@@ -21,6 +21,8 @@ use std::convert::TryFrom;
 
 extern crate crossbeam_skiplist;
 use crossbeam_skiplist::SkipMap;
+extern crate tempfile;
+use tempfile::tempdir;
 
 
 // on tuning bloom filters:
@@ -298,6 +300,8 @@ impl Tree {
         // we should probably send them a custom error with steps to fix
         if !self.path.exists() {
             fs::create_dir_all(&self.path)?;
+        }
+        if fs::read_dir(&self.path).unwrap().next().is_none() {
             let buffer = [0; 5];
             self.tables_per_level = Some(buffer);
 
@@ -324,8 +328,7 @@ impl Tree {
             .read(true)
             .write(true)
             .append(true)
-            .open(self.path.clone().join("wal"))
-            .unwrap());
+            .open(self.path.clone().join("wal"))?);
         }
         Ok(())
     }
@@ -683,14 +686,156 @@ fn main() -> Result<(), Box<dyn Error>> {
 // unit tests
 // (try to) test individual functions
 // need to research mocking
+// TODO: wrap any writing to header/wal/sstable so code/tests stay consistent
+// TODO: version header/wal/sstable to provide backward compatibility
 #[cfg(test)]
-mod unit_tests {
-    // use super::*;
+mod init_tests {
+    use std::fs::{create_dir, remove_dir};
 
-    // #[test]
-    // fn test_add_two() {
-    //     assert_eq!(add_two(2), 4);
-    // }
+    use super::*;
+    // TODO: these check for the existence of some error
+    // however, they should check for the particular error that arises
+    // will fix this when I fix the API. I should be returning custom errors to the user
+    #[test]
+    fn test_init_create() -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+        tree.init_folder().expect("Failed to init folder");
+        let header_path = dir.path().clone().join("header");
+        let wal_path = dir.path().clone().join("header");
+        assert!(header_path.exists());
+        assert!(wal_path.exists());
+        let mut buf = [0; 5];
+        let expected = [0; 5];
+        let mut header_file = File::open(header_path)?;
+        header_file.read_exact(&mut buf)?;
+        assert_eq!(buf, expected);
+        Ok(())
+    }
+    // going to simply create another tree for convenience
+    // TODO: figure this out with tree locking scheme
+    #[test]
+    fn missing_header() -> Result<(), Box<dyn Error>> {
+        // the following 3 lines are pretty repetitive
+        // i'm going to opt out of using a helper function, as i am sure this will not change
+        // and it will be roughly the same LOC
+        let dir = tempdir()?;
+        let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+        tree.init_folder().expect("Failed to init folder");
+        remove_file(dir.path().join("header"))?;
+        let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+        assert!(tree.init().is_err());
+        Ok(())
+    }
+    #[test]
+    fn missing_wal() -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+        tree.init_folder().expect("Failed to init folder");
+        remove_file(dir.path().join("wal"))?;
+        let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+        assert!(tree.init().is_err());
+        Ok(())
+    }
+    #[test]
+    fn invalid_file_root() -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+        tree.init_folder().expect("Failed to init folder");
+        File::create(dir.path().join("test"))?;
+        let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+        assert!(tree.init().is_err());
+        Ok(())
+    }
+    #[test]
+    fn extraneous_root() -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+        tree.init_folder().expect("Failed to init folder");
+        create_dir(dir.path().join("test"))?;
+        let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+        assert!(tree.init().is_err());
+        remove_dir(dir.path().join("test"))?;
+        create_dir(dir.path().join("5"))?;
+        let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+        assert!(tree.init().is_err());
+        Ok(())
+    }
+    #[test]
+    fn extraneous_nonroot() -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+        tree.init_folder().expect("Failed to init folder");
+        // for some level to exist, we need a sstable
+        // TODO: there can be a case where a level folder (other than 0) exists, but there are no tables inside (failure during compaction)
+        // see if this presents any issues
+        // rewrite header with bytes 10000
+        let mut header_file = File::create(dir.path().join("header"))?;
+        let new_header: [u8; 5] = [1, 0, 0, 0, 0];
+        header_file.write_all(&new_header)?;
+        create_dir(dir.path().join("0"))?;
+        File::create(dir.path().join("0").join("0"))?;
+        File::create(dir.path().join("0").join("test"))?;
+        let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+        tree.init_folder().expect("Failed to init folder");
+        Ok(())
+    }
+    #[test]
+    fn non_contiguous_sstables() -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+        tree.init_folder().expect("Failed to init folder");
+        let mut header_file = File::create(dir.path().join("header"))?;
+        let new_header: [u8; 5] = [2, 0, 0, 0, 0];
+        header_file.write_all(&new_header)?;
+        create_dir(dir.path().join("0"))?;
+        File::create(dir.path().join("0").join("0"))?;
+        File::create(dir.path().join("0").join("2"))?;
+        let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+        tree.init_folder().expect("Failed to init folder");
+        Ok(())
+    }
+    #[test]
+    fn no_zero_sstable() -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+        tree.init_folder().expect("Failed to init folder");
+        let mut header_file = File::create(dir.path().join("header"))?;
+        let new_header: [u8; 5] = [1, 0, 0, 0, 0];
+        header_file.write_all(&new_header)?;
+        create_dir(dir.path().join("0"))?;
+        File::create(dir.path().join("0").join("1"))?;
+        let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+        tree.init_folder().expect("Failed to init folder");
+        Ok(())
+    }
+    #[test]
+    fn sstables_header_mismatch() -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+        tree.init_folder().expect("Failed to init folder");
+        let mut header_file = File::create(dir.path().join("header"))?;
+        let new_header: [u8; 5] = [3, 1, 0, 0, 0];
+        // we'll make it so there are only 2 sstables in the first level
+        header_file.write_all(&new_header)?;
+        create_dir(dir.path().join("0"))?;
+        File::create(dir.path().join("0").join("0"))?;
+        File::create(dir.path().join("0").join("1"))?;
+        create_dir(dir.path().join("1"))?;
+        File::create(dir.path().join("0").join("0"))?;
+        let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+        tree.init_folder().expect("Failed to init folder");
+        Ok(())
+    }
+}
+#[cfg(test)]
+mod search_index_tests {
+    // use super::*;
+    // for these tests: vector ordering is lexicographic
+    // test bucketed binary search
+    // test out of range to the left
+    // test item first/middlish/last
+    // test item on boundary of buckets (just barely less than the next)
 }
 /* Things to test:
 persistence happens through one of three ways: memtable flush, wal restoration, compaction
@@ -702,11 +847,10 @@ key found in nonfirst datablock
 empty k/v
 super long k/v
 
-test compaction?
+test compaction
 
 out of space
-test recovery - there are so many places this can fail (HOW CAN I MAKE THIS FAIL? I DON'T WANT TO MOCK 1000 FS calls)
-^^ don't, just propogate to client code. rust analyzer will make sure no result goes unhandled
+test recovery - difficult to test this (could make any IO fail, but how can I do this without mocking every IO)
 performance
 
 big honking test
