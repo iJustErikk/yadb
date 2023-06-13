@@ -83,8 +83,13 @@ use tempfile::tempdir;
 // when testing: mark process so it can be easily killed prior to startup
 // assumption: in the future: user wants lexicographic ordering on keys
 // as this is embedded, user could provide custom comparator or merge operator
+
+// TODO: add more errors
+// I'm wrapping IOError for now, but this is not useful for the end user.
+// the user is going to want specific, actionable errors
 #[derive(Debug)]
-enum InvalidDatabaseStateError {
+enum YAStorageError {
+    IOError {error: io::Error},
     MissingHeader,
     CorruptedHeader,
     UnexpectedUserFolder { folderpath: String },
@@ -94,22 +99,35 @@ enum InvalidDatabaseStateError {
     CorruptWalEntry
 }
 
-impl fmt::Display for InvalidDatabaseStateError {
+impl YAStorageError {
+    fn new(error: io::Error) -> YAStorageError {
+        YAStorageError::IOError{error}
+    }
+}
+
+impl From<io::Error> for YAStorageError {
+    fn from(error: io::Error) -> Self {
+        YAStorageError::new(error)
+    }
+}
+
+impl fmt::Display for YAStorageError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            InvalidDatabaseStateError::MissingHeader => write!(f, "Missing header"),
-            InvalidDatabaseStateError::CorruptedHeader => write!(f, "Corrupted header"),
-            InvalidDatabaseStateError::UnexpectedUserFolder { ref folderpath } => write!(f, "Unexpected user folder: {}", folderpath),
-            InvalidDatabaseStateError::UnexpectedUserFile { ref filepath } => write!(f, "Unexpected user file: {}", filepath),
-            InvalidDatabaseStateError::LevelTooLarge { ref level } => write!(f, "Level too large: {}", level),
-            InvalidDatabaseStateError::SSTableMismatch { ref expected, ref actual } => write!(f, "SSTable mismatch: expected {:?}, got {:?}", expected, actual),
-            InvalidDatabaseStateError::CorruptWalEntry => write!(f, "Corrupt Wal Entry")
+        match self {
+            YAStorageError::MissingHeader => write!(f, "Missing header"),
+            YAStorageError::CorruptedHeader => write!(f, "Corrupted header"),
+            YAStorageError::UnexpectedUserFolder { folderpath } => write!(f, "Unexpected user folder: {}", folderpath),
+            YAStorageError::UnexpectedUserFile { filepath } => write!(f, "Unexpected user file: {}", filepath),
+            YAStorageError::LevelTooLarge { level } => write!(f, "Level too large: {}", level),
+            YAStorageError::SSTableMismatch { expected, actual } => write!(f, "SSTable mismatch: expected {:?}, got {:?}", expected, actual),
+            YAStorageError::CorruptWalEntry => write!(f, "Corrupt Wal Entry"),
+            YAStorageError::IOError { error } => write!(f, "IO Error: {}", error.to_string()),
         }
     }
 }
 
 
-impl Error for InvalidDatabaseStateError {}
+impl Error for YAStorageError {}
 
 struct Tree {
     // let's start with 5 levels
@@ -213,7 +231,7 @@ struct Index {
 // ~2.5 million keys in sparse index
 // way less than 1gb in memory
 impl Index {
-    pub fn deserialize<R: Read>(mut reader: R) -> Result<Index, Box<dyn Error>> {
+    pub fn deserialize<R: Read>(mut reader: R) -> Result<Index, io::Error> {
         let mut entries = Vec::new();
         // for now, just store the length here
         // but, when we get to compaction
@@ -221,10 +239,10 @@ impl Index {
         // as they are not in memory
         // why not store this in the header?
         // we have at most 50 tables, so storing more data there will still be atomic within a single write
-        let index_size = reader.read_u64::<LittleEndian>().unwrap();
+        let index_size = reader.read_u64::<LittleEndian>()?;
         let mut bytes_read = 0;
         while bytes_read != index_size {
-            let key_size = reader.read_u64::<LittleEndian>().unwrap();
+            let key_size = reader.read_u64::<LittleEndian>()?;
             let mut key = vec![0; key_size as usize];
             reader.read_exact(&mut key)?;
             let offset = reader.read_u64::<LittleEndian>()?;
@@ -299,7 +317,7 @@ impl WALEntry {
 
         
         // if newline[0] != b'\n' {
-        //     return Err(InvalidDatabaseStateError::CorruptWalEntry)?;
+        //     return Err(YAStorageError::CorruptWalEntry)?;
         // }
         Ok(WALEntry {
             operation,
@@ -330,7 +348,7 @@ impl Tree {
     pub fn new(path: &str) -> Self{
         return Tree {num_levels: None, wal_file: None, tables_per_level: None, path: PathBuf::from(path), memtable: Memtable{skipmap: SkipMap::new(), size: 0}};
     }
-    pub fn init(&mut self) -> Result<(), Box<dyn Error>> {
+    pub fn init(&mut self) -> Result<(), YAStorageError> {
         self.init_folder()?;
 
         self.cleanup_uncommitted()?;
@@ -340,14 +358,14 @@ impl Tree {
         self.restore_wal()?;
         Ok(())
     }
-    fn init_folder(&mut self) -> Result<(), Box<dyn Error>> {
+    fn init_folder(&mut self) -> Result<(), YAStorageError> {
         // TODO:
         // right now we just pass the error up to the user
         // we should probably send them a custom error with steps to fix
         if !self.path.exists() {
             fs::create_dir_all(&self.path)?;
         }
-        if fs::read_dir(&self.path).unwrap().next().is_none() {
+        if fs::read_dir(&self.path)?.next().is_none() {
             let buffer = [0; 5];
             self.tables_per_level = Some(buffer);
 
@@ -360,14 +378,14 @@ impl Tree {
             .append(true)
             .create(true)
             .open(self.path.clone().join("wal"))
-            .unwrap());
+            ?);
 
             
         } else {
             let mut buffer = [0; 5];
-            // if this fails, alert the user with InvalidDatabaseStateError, missing header
+            // if this fails, alert the user with YAStorageError, missing header
             let mut file = File::open(self.path.clone().join("header"))?;
-            // if this fails, alert the user with InvalidDatabaseStateError, corrupted header
+            // if this fails, alert the user with YAStorageError, corrupted header
             file.read_exact(&mut buffer)?;
             self.tables_per_level = Some(buffer);
             self.wal_file = Some(OpenOptions::new()
@@ -381,7 +399,7 @@ impl Tree {
     // TODO: custom error and help steps as above
     // failure may happen in startup (wal replay), compaction or memtable flush
     // cleanup after failure
-    fn cleanup_uncommitted(&self) -> Result<(), Box<dyn Error>>  {
+    fn cleanup_uncommitted(&self) -> Result<(), YAStorageError>  {
         for entry_result in fs::read_dir(&self.path)? {
             let entry = entry_result?;
             if entry.file_type()?.is_dir() {
@@ -389,7 +407,7 @@ impl Tree {
                     let sub_entry = sub_entry_result?;
                     if sub_entry.file_type()?.is_file() && sub_entry.file_name().into_string().unwrap().starts_with("uncommitted") {
                         remove_file(&sub_entry.path())?;
-                        if fs::read_dir(sub_entry.path().parent().unwrap()).unwrap().next().is_none() {
+                        if fs::read_dir(sub_entry.path().parent().unwrap())?.next().is_none() {
                             // if this folder is now empty, delete it
                             fs::remove_dir_all(sub_entry.path().parent().unwrap())?;
                         }
@@ -400,7 +418,7 @@ impl Tree {
         Ok(())
     }
 
-    fn general_sanity_check(&mut self) -> Result<(), Box<dyn Error>> {
+    fn general_sanity_check(&mut self) -> Result<(), YAStorageError> {
 
         // any folder should be 0 - 4
         // any file in those folders should be numeric
@@ -419,10 +437,10 @@ impl Tree {
 
                 let level = match entry.file_name().into_string().unwrap().parse::<u8>() {
                     Ok(value) => Ok(value),
-                    Err(_) => Err(InvalidDatabaseStateError::UnexpectedUserFolder{folderpath: entry.file_name().into_string().unwrap()})
+                    Err(_) => Err(YAStorageError::UnexpectedUserFolder{folderpath: entry.file_name().into_string().unwrap()})
                 }?;
                 if level > 4 {
-                    return Err(InvalidDatabaseStateError::LevelTooLarge{level})?;
+                    return Err(YAStorageError::LevelTooLarge{level})?;
                 }
                 // assumption: if there is some valid file/fodler, then it was generated by the database
                 if level >= num_levels as u8 {
@@ -441,11 +459,11 @@ impl Tree {
                     // ensure this is a valid 
                     let sub_entry = sub_entry_result?;
                     if sub_entry.file_type()?.is_dir() {
-                        return Err(InvalidDatabaseStateError::UnexpectedUserFolder{folderpath: sub_entry.file_name().into_string().unwrap()})?;
+                        return Err(YAStorageError::UnexpectedUserFolder{folderpath: sub_entry.file_name().into_string().unwrap()})?;
                     }
                     let table_name = match sub_entry.file_name().into_string().unwrap().parse::<u8>() {
                         Ok(value) => Ok(value),
-                        Err(_) => Err(InvalidDatabaseStateError::UnexpectedUserFile{filepath: sub_entry.file_name().into_string().unwrap()})
+                        Err(_) => Err(YAStorageError::UnexpectedUserFile{filepath: sub_entry.file_name().into_string().unwrap()})
                     }?;
                     actual.push(table_name);
                 }
@@ -456,10 +474,10 @@ impl Tree {
                 // must revisit
                 let expected: Vec<u8> = (0..self.tables_per_level.unwrap()[level as usize]).collect();
                 if actual != expected {
-                    return Err(InvalidDatabaseStateError::SSTableMismatch{expected, actual})?;
+                    return Err(YAStorageError::SSTableMismatch{expected, actual})?;
                 }
             } else if entry.file_type()?.is_file() && (entry.file_name() != "header" && entry.file_name() != "wal") {
-                return Err(InvalidDatabaseStateError::UnexpectedUserFile{filepath: entry.path().into_os_string().into_string().unwrap()})?;
+                return Err(YAStorageError::UnexpectedUserFile{filepath: entry.path().into_os_string().into_string().unwrap()})?;
             }
         }
 
@@ -467,47 +485,47 @@ impl Tree {
 
     }
     
-    fn search_table(&self, level: usize, table: u8, key: &Vec<u8>) -> Option<Vec<u8>> {
+    fn search_table(&self, level: usize, table: u8, key: &Vec<u8>) -> Result<Option<Vec<u8>>, YAStorageError> {
         // not checking bloom filter yet
-        let mut table = File::open(self.path.clone().join(level.to_string()).join(table.to_string())).unwrap();
-        let index = Index::deserialize(&table).unwrap();
+        let mut table = File::open(self.path.clone().join(level.to_string()).join(table.to_string()))?;
+        let index = Index::deserialize(&table)?;
         let byte_offset = search_index(&index, key);
         if byte_offset.is_none() {
-            return None;
+            return Ok(None);
         }
-        table.seek(SeekFrom::Current(byte_offset.unwrap() as i64)).unwrap();
-        let block = DataBlock::deserialize(&mut table).unwrap();
+        table.seek(SeekFrom::Current(byte_offset.unwrap() as i64))?;
+        let block = DataBlock::deserialize(&mut table)?;
         for (cantidate_key, value) in block.entries {
             if &cantidate_key == key {
-                return Some(value);
+                return Ok(Some(value));
             }
         }
-        return None
+        return Ok(None)
     }
-    pub fn get(&self, key: &Vec<u8>) -> Option<Vec<u8>> {
+    pub fn get(&self, key: &Vec<u8>) -> Result<Option<Vec<u8>>, YAStorageError> {
         assert!(key.len() != 0);
         if let Some(value) = self.memtable.skipmap.get(key) {
             let res = value.value().to_vec();
             if res.len() == 0 {
-                return None;
+                return Ok(None);
             }
-            return Some(res);
+            return Ok(Some(res));
         }
         for level in 0..self.num_levels.unwrap() {
             for sstable in (0..self.tables_per_level.unwrap()[level]).rev() {
                 // TODO: if value vector is empty, this is a tombstone
-                if let Some(res) = self.search_table(level, sstable, &key) {
+                if let Some(res) = self.search_table(level, sstable, &key)? {
                     // empty length vector is tombstone
                     // clients cannot write an empty length value
                     // is this limiting?
                     if res.len() == 0 {
-                        return None;
+                        return Ok(None);
                     }
-                    return Some(res);
+                    return Ok(Some(res));
                 }
             }
         }
-        return None;
+        return Ok(None);
     }
     fn get_next_sstable_location() {
 
@@ -515,21 +533,21 @@ impl Tree {
     // convert skipmap to sstable
     // start calling compaction
     
-    fn write_skipmap_as_sstable(&mut self) {
+    fn write_skipmap_as_sstable(&mut self) -> Result<(), io::Error> {
         if self.memtable.skipmap.len() == 0 {
-            return;
+            return Ok(());
         }
         println!("{}", self.memtable.skipmap.len());
         // todo: compaction
         let table_to_write = self.tables_per_level.unwrap()[0];
         let filename = format!("uncommitted{}", table_to_write.to_string());
         if !self.path.join("0").exists() {
-            fs::create_dir(self.path.join("0")).unwrap();
+            fs::create_dir(self.path.join("0"))?;
         }
         // we better not be overwriting something
         // otherwise we are shooting ourselves in the foot
         assert!(!self.path.join("0").join(&filename).exists());
-        let mut table = File::create(self.path.join("0").join(&filename)).unwrap();
+        let mut table = File::create(self.path.join("0").join(&filename))?;
 
         let mut index: Vec<u8> = Vec::new();
         let mut data_section: Vec<u8> = Vec::new();
@@ -540,22 +558,22 @@ impl Tree {
             let value = entry.value();
             keys_visited += 1;
             if current_block.is_empty() {
-                index.write_u64::<LittleEndian>(key.len() as u64).unwrap();
+                index.write_u64::<LittleEndian>(key.len() as u64)?;
                 index.extend(key);
-                index.write_u64::<LittleEndian>(data_section.len() as u64).unwrap();
+                index.write_u64::<LittleEndian>(data_section.len() as u64)?;
             }
-            current_block.write_u64::<LittleEndian>(key.len() as u64).unwrap();
+            current_block.write_u64::<LittleEndian>(key.len() as u64)?;
             current_block.extend(key);
-            current_block.write_u64::<LittleEndian>(value.len() as u64).unwrap();
+            current_block.write_u64::<LittleEndian>(value.len() as u64)?;
             current_block.extend(value);
             if current_block.len() > 4_000 || keys_visited == self.memtable.skipmap.len() {
-                data_section.write_u64::<LittleEndian>(current_block.len() as u64).unwrap();
+                data_section.write_u64::<LittleEndian>(current_block.len() as u64)?;
                 data_section.append(&mut current_block);
             }
         }
-        table.write_u64::<LittleEndian>(index.len() as u64).unwrap();
-        table.write_all(&index).unwrap();
-        table.write_all(&data_section).unwrap();
+        table.write_u64::<LittleEndian>(index.len() as u64)?;
+        table.write_all(&index)?;
+        table.write_all(&data_section)?;
         let old_path = self.path.join("0").join(&filename);
         let new_path = self.path.join("0").join(table_to_write.to_string());
         // before we commit the table, update header
@@ -565,16 +583,18 @@ impl Tree {
             self.num_levels = Some(1);
         }
         println!("new tables {}", self.tables_per_level.unwrap()[0]);
-        fs::write(self.path.join("header"), self.tables_per_level.unwrap()).unwrap();
-        std::fs::rename(old_path, new_path).unwrap();
-        table.sync_all().unwrap();
+        fs::write(self.path.join("header"), self.tables_per_level.unwrap())?;
+        std::fs::rename(old_path, new_path)?;
+        table.sync_all()?;
         self.memtable.skipmap = SkipMap::new();
+        Ok(())
     }
 
-    fn append_to_wal(&mut self, entry: WALEntry) {
-        entry.serialize(&mut (self.wal_file.as_mut().unwrap())).unwrap();
+    fn append_to_wal(&mut self, entry: WALEntry) -> Result<(), io::Error> {
+        entry.serialize(&mut (self.wal_file.as_mut().unwrap()))?;
         // wal metadata should not change, so sync_data is fine to use, instead of sync_all/fsync
-        self.wal_file.as_mut().unwrap().sync_data().unwrap();
+        self.wal_file.as_mut().unwrap().sync_data()?;
+        Ok(())
     }
 
     fn restore_wal(&mut self) -> Result<(), io::Error> {
@@ -608,19 +628,16 @@ impl Tree {
 
         self.memtable.skipmap = skipmap;
 
-        self.write_skipmap_as_sstable();
+        self.write_skipmap_as_sstable()?;
         // wal file persisted, truncate
-        self.wal_file.as_mut().unwrap().set_len(0).unwrap();
+        self.wal_file.as_mut().unwrap().set_len(0)?;
         
-        self.wal_file.as_mut().unwrap().sync_all().unwrap();
-
-
-        
+        self.wal_file.as_mut().unwrap().sync_all()?;
 
         Ok(())
     }
 
-    fn add_walentry(&mut self, operation: Operation, key: &Vec<u8>, value: &Vec<u8>) {
+    fn add_walentry(&mut self, operation: Operation, key: &Vec<u8>, value: &Vec<u8>) -> Result<(), YAStorageError>  {
         let old_size = if self.memtable.skipmap.contains_key(key) { key.len() + self.memtable.skipmap.get(key).unwrap().value().len()} else { 0};
         let new_size = key.len() + value.len();
         // split these up, as adding the difference causes overflow on deletes
@@ -633,29 +650,32 @@ impl Tree {
             self.memtable.skipmap.insert(key.to_vec(), Vec::new());
         }
 
-        self.append_to_wal(WALEntry { operation, key: key.to_vec(), value: value.to_vec() });
+        self.append_to_wal(WALEntry { operation, key: key.to_vec(), value: value.to_vec() })?;
         // TODO: no magic values
         // add config setting
         if self.memtable.size > 1_000_000 {
-            self.write_skipmap_as_sstable();
+            self.write_skipmap_as_sstable()?;
             self.memtable.skipmap = SkipMap::new();
             // wal persisted, truncate now
             self.wal_file.as_mut().unwrap().set_len(0).unwrap();
             self.wal_file.as_mut().unwrap().sync_all().unwrap();
         }
+        Ok(())
     }
 
-    pub fn put(&mut self, key: &Vec<u8>, value: &Vec<u8>) {
+    pub fn put(&mut self, key: &Vec<u8>, value: &Vec<u8>) -> Result<(), YAStorageError> {
         assert!(key.len() != 0);
         // empty length value is tombstone
         assert!(value.len() != 0);
-        self.add_walentry(Operation::PUT, key, value);
+        self.add_walentry(Operation::PUT, key, value)?;
+        Ok(())
     }
 
-    pub fn delete(&mut self, key: &Vec<u8>) {
+    pub fn delete(&mut self, key: &Vec<u8>) -> Result<(), YAStorageError>  {
         assert!(key.len() != 0);
         // empty value is tombstone
-        self.add_walentry(Operation::DELETE, key, &Vec::new());
+        self.add_walentry(Operation::DELETE, key, &Vec::new())?;
+        Ok(())
     }
 }
 
@@ -681,9 +701,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         // println!("{}", i);
         let key = i.to_string();
         let value = 0.to_string();
-        tree.get(&(key.as_bytes().to_vec()));
-        tree.put(&(key.as_bytes().to_vec()), &(value.as_bytes().to_vec()));
-        tree.delete(&(key.as_bytes().to_vec()));
+        tree.get(&(key.as_bytes().to_vec()))?;
+        tree.put(&(key.as_bytes().to_vec()), &(value.as_bytes().to_vec()))?;
+        tree.delete(&(key.as_bytes().to_vec()))?;
     }
     
     Ok(())
@@ -794,7 +814,6 @@ mod init_tests {
         let new_header: [u8; 5] = [1, 0, 0, 0, 0];
         header_file.write_all(&new_header)?;
         create_dir(dir.path().join("0"))?;
-        File::create(dir.path().join("0").join("0"))?;
         create_dir(dir.path().join("0").join("0"))?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
         tree.init_folder().expect("Failed to init folder");
