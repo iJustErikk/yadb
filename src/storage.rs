@@ -150,6 +150,52 @@ impl TryFrom<u8> for Operation {
 struct Index {
     entries: Vec<(Vec<u8>, u64)>,
 }
+
+// TODO: allow user to supply custom comparators
+    // returns the bucket a key is potentially inside
+    // each bucket i is [start key at i, start key at i + 1)
+    // binary search over i
+    // find i such that key is in the bucket
+    // note: this always returns the last bucket for a key that is larger than the last bucket start key
+    // if key in range, return mid
+    // if key < start key, move right pointer to mid
+    // if key >= next start key, move left pointer to right
+    // proof of correctness:
+    // assume value is in some bucket in the array
+    // if throughout the execution the value is in the range of buckets, then it is correct
+    // if all search space cuts preserve this, then we will return the bucket containing, as eventually
+    // ...there will be only 1 bucket and that has to satisfy the property (could do proof by contradiction, see that if this was not the case...
+    //  then there would be a different partitioning of the search space and thus a different last block)
+    // if key < index_keys[mid] -> cuts right half (keeps mid's block), very much still in there
+    // if key >= index_keys[mid + 1] -> cuts left half -> left half is known to be less
+    // these maintain our containing invariant so this is correct
+    fn search_index(index: &Index, key: &Vec<u8>) -> Option<u64> {
+        assert!(index.entries.len() != 0);
+        assert!(key.len() != 0);
+        // TODO: do these comparators actl work?
+        if key < &index.entries[0].0 {
+            return None
+        }
+        
+        let mut left = 0;
+        let mut right = index.entries.len() - 1;
+        loop {
+            let mid = (left + right) / 2;
+            if mid == index.entries.len() - 1 {
+                assert!(key >= &index.entries[index.entries.len() - 1].0);
+                return Some(index.entries[mid].1);
+            }
+            if key < &index.entries[mid].0 {
+                right = mid;
+            } else if key >= &index.entries[mid + 1].0  {
+                left = mid + 1;
+            } else {
+                // if key > start && < end -> in bucket
+                return Some(index.entries[mid].1);
+            }
+        }
+    }
+
 // index grows linearly with sstable data
 // index has a key for each ~4kb block
 // if we have 1tb of data
@@ -420,57 +466,16 @@ impl Tree {
         Ok(())
 
     }
-    // TODO: allow user to supply custom comparators
-    // returns the bucket a key is potentially inside
-    // each bucket i is [start key at i, start key at i + 1)
-    // binary search over i
-    // find i such that key is in the bucket
-    // note: this always returns the last bucket for a key that is larger than the last bucket start key
-    // if key in range, return mid
-    // if key < start key, move right pointer to mid
-    // if key >= next start key, move left pointer to right
-    // proof of correctness:
-    // assume value is in some bucket in the array
-    // if throughout the execution the value is in the range of buckets, then it is correct
-    // if all search space cuts preserve this, then we will return the bucket containing, as eventually
-    // ...there will be only 1 bucket and that has to satisfy the property (could do proof by contradiction, see that if this was not the case...
-    //  then there would be a different partitioning of the search space and thus a different last block)
-    // if key < index_keys[mid] -> cuts right half (keeps mid's block), very much still in there
-    // if key >= index_keys[mid + 1] -> cuts left half -> left half is known to be less
-    // these maintain our containing invariant so this is correct
-    fn search_index(&self, index: &Index, key: &Vec<u8>) -> Option<u64> {
-        // TODO: do these comparators actl work?
-        if key < &index.entries[0].0 {
-            return None
-        }
-        
-        let mut left = 0;
-        let mut right = index.entries.len() - 1;
-        loop {
-            let mid = (left + right) / 2;
-            if mid == index.entries.len() - 1 {
-                assert!(key >= &index.entries[index.entries.len() - 1].0);
-                return Some(mid as u64);
-            }
-            if key < &index.entries[mid].0 {
-                right = mid;
-            } else if key >= &index.entries[mid + 1].0  {
-                left = mid + 1;
-            } else {
-                // if key > start && < end -> in bucket
-                return Some(mid as u64);
-            }
-        }
-    }
+    
     fn search_table(&self, level: usize, table: u8, key: &Vec<u8>) -> Option<Vec<u8>> {
         // not checking bloom filter yet
         let mut table = File::open(self.path.clone().join(level.to_string()).join(table.to_string())).unwrap();
         let index = Index::deserialize(&table).unwrap();
-        let block_num = self.search_index(&index, key);
-        if block_num.is_none() {
+        let byte_offset = search_index(&index, key);
+        if byte_offset.is_none() {
             return None;
         }
-        table.seek(SeekFrom::Current(index.entries[block_num.unwrap() as usize].1 as i64)).unwrap();
+        table.seek(SeekFrom::Current(byte_offset.unwrap() as i64)).unwrap();
         let block = DataBlock::deserialize(&mut table).unwrap();
         for (cantidate_key, value) in block.entries {
             if &cantidate_key == key {
@@ -691,7 +696,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod init_tests {
     use std::fs::{create_dir, remove_dir};
-
     use super::*;
     // TODO: these check for the existence of some error
     // however, they should check for the particular error that arises
@@ -738,7 +742,7 @@ mod init_tests {
         Ok(())
     }
     #[test]
-    fn invalid_file_root() -> Result<(), Box<dyn Error>> {
+    fn extraneous_file_root() -> Result<(), Box<dyn Error>> {
         let dir = tempdir()?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
         tree.init_folder().expect("Failed to init folder");
@@ -748,7 +752,7 @@ mod init_tests {
         Ok(())
     }
     #[test]
-    fn extraneous_root() -> Result<(), Box<dyn Error>> {
+    fn extraneous_folder_root() -> Result<(), Box<dyn Error>> {
         let dir = tempdir()?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
         tree.init_folder().expect("Failed to init folder");
@@ -762,7 +766,7 @@ mod init_tests {
         Ok(())
     }
     #[test]
-    fn extraneous_nonroot() -> Result<(), Box<dyn Error>> {
+    fn extraneous_file_nonroot() -> Result<(), Box<dyn Error>> {
         let dir = tempdir()?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
         tree.init_folder().expect("Failed to init folder");
@@ -776,6 +780,22 @@ mod init_tests {
         create_dir(dir.path().join("0"))?;
         File::create(dir.path().join("0").join("0"))?;
         File::create(dir.path().join("0").join("test"))?;
+        let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+        tree.init_folder().expect("Failed to init folder");
+        Ok(())
+    }
+    #[test]
+    fn extraneous_folder_nonroot() -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+        tree.init_folder().expect("Failed to init folder");
+
+        let mut header_file = File::create(dir.path().join("header"))?;
+        let new_header: [u8; 5] = [1, 0, 0, 0, 0];
+        header_file.write_all(&new_header)?;
+        create_dir(dir.path().join("0"))?;
+        File::create(dir.path().join("0").join("0"))?;
+        create_dir(dir.path().join("0").join("0"))?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
         tree.init_folder().expect("Failed to init folder");
         Ok(())
@@ -830,12 +850,48 @@ mod init_tests {
 }
 #[cfg(test)]
 mod search_index_tests {
-    // use super::*;
-    // for these tests: vector ordering is lexicographic
-    // test bucketed binary search
-    // test out of range to the left
-    // test item first/middlish/last
-    // test item on boundary of buckets (just barely less than the next)
+    // fn search_index(index: &Index, key: &Vec<u8>) -> Option<u64> {
+    use super::*;
+    fn str_to_byte_buf(s: &str) -> Vec<u8> {
+        return s.as_bytes().to_vec();
+    }
+    fn index_from_string_vector(slice: &[&str]) -> Index {
+        return Index {
+            entries: slice.iter().enumerate().map(|(i, &x)| (str_to_byte_buf(x), i as u64)).collect()
+        }
+    }
+    // for these tests: vector ordering is lexicographic, so it will respect 1 byte character strings
+    #[test]
+    fn test_out_of_range_to_the_left() {
+        let index = ["bombastic", "sideeye"];
+        assert!(search_index(&index_from_string_vector(&index), &str_to_byte_buf(&"aeon")).is_none());
+    }
+    #[test]
+    fn test_item_first_middle_last() {
+        let index = ["affluent", "burger", "comes", "to", "town", "sunday"];
+        assert!(search_index(&index_from_string_vector(&index), &str_to_byte_buf(&"apple")).unwrap() == 0);
+        assert!(search_index(&index_from_string_vector(&index), &str_to_byte_buf(&"todler")).unwrap() == 3);
+        assert!(search_index(&index_from_string_vector(&index), &str_to_byte_buf(&"zephyr")).unwrap() == 5);
+
+    }    // test item on boundary of buckets (just barely less than the next)
+    #[test]
+    fn test_left_right_bounary() {
+        let index = ["affluent", "burger", "comes"];
+        assert!(search_index(&index_from_string_vector(&index), &str_to_byte_buf(&"burger")).unwrap() == 1);
+        assert!(search_index(&index_from_string_vector(&index), &str_to_byte_buf(&"comeq")).unwrap() == 1);
+        assert!(search_index(&index_from_string_vector(&index), &str_to_byte_buf(&"comes")).unwrap() == 2);
+
+    }
+    #[test]
+    fn test_single_two_item_index() {
+        let single = ["affluent"];
+        let double = ["affluent", "burger"];
+        assert!(search_index(&index_from_string_vector(&single), &str_to_byte_buf(&"affluent")).unwrap() == 0);
+        assert!(search_index(&index_from_string_vector(&single), &str_to_byte_buf(&"burger")).unwrap() == 0);
+        assert!(search_index(&index_from_string_vector(&double), &str_to_byte_buf(&"aging")).unwrap() == 0);
+        // Hired as eng. Promoted to pun master.
+        assert!(search_index(&index_from_string_vector(&double), &str_to_byte_buf(&"burgeroisie")).unwrap() == 1);
+    }
 }
 /* Things to test:
 persistence happens through one of three ways: memtable flush, wal restoration, compaction
