@@ -1,0 +1,26 @@
+Implementing all of these is time consuming. Need to prioritize so I can implement distributed kv store (almost ready)/sql database (need db iterator, performance enhancements)
+TODO:
+- asyncify code (use tokio)
+- implement compaction
+- implement custom merge operator
+- utilize bloom filters on reads
+- implement filter/index/block cache
+- extract magic variables to config (in cargo.toml)
+- extend errors so they are more actionable
+- write fuzzer
+- create/find benchmarks
+- profile and see what is taking so long
+- eliminate needless copies
+- implement iterator
+- implement multithreaded compaction
+- abstract away compaction logic (for potentially more compactions)
+- abstract away touching any files
+- implement multithreaded writes/reads
+- rate limit compaction (static, additive/multiplicative increase, multiplicative decrease)
+- support tables? (see whether pebble does this)
+- compression
+- checksums
+- more stuff for dbs (merkle tree differences, transactions, configuring WAL log so it can hook up to replication logs like Raft)
+- more verification
+- monitoring
+- multiget/multiput (see rocksdb)
