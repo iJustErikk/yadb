@@ -1,8 +1,6 @@
 for any ordered bytes, they are converted to little endian for disk or network
 sstable:
+# bytes for datablocks, [(block_len, [(key_len as u64, key, value_len as u64, value)])] <- datablocks
 # bytes for index, [(key_len as u64, key)] <- sparse index
-[(block_len, [(key_len as u64, key, value_len as u64, value)])] <- datablocks
 
-proposal: put index after datablocks (will need to put datablocks len before datablocks to seek over that)
-so we can simplify compaction implementation
-(rethink this? )
+The index is placed after the datablocks to simplify compaction implementation.

@@ -231,14 +231,10 @@ struct Index {
 // ~2.5 million keys in sparse index
 // way less than 1gb in memory
 impl Index {
-    pub fn deserialize<R: Read>(mut reader: R) -> Result<Index, io::Error> {
+    pub fn deserialize(mut reader: &File) -> Result<Index, io::Error> {
         let mut entries = Vec::new();
-        // for now, just store the length here
-        // but, when we get to compaction
-        // we won't know the length of the data or index before we start writing them
-        // as they are not in memory
-        // why not store this in the header?
-        // we have at most 50 tables, so storing more data there will still be atomic within a single write
+        let datablock_size = reader.read_u64::<LittleEndian>()?;
+        reader.seek(SeekFrom::Current(datablock_size as i64))?;
         let index_size = reader.read_u64::<LittleEndian>()?;
         let mut bytes_read = 0;
         while bytes_read != index_size {
@@ -250,7 +246,6 @@ impl Index {
             bytes_read += 2 * u64_num_bytes + key_size;
             entries.push((key, offset));
         }
-    
         Ok(Index{entries})
     }
 }
@@ -265,7 +260,7 @@ struct DataBlock {
 }
 
 impl DataBlock {
-    pub fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
+    pub fn deserialize(reader: &mut File) -> io::Result<Self> {
         let block_size = reader.read_u64::<LittleEndian>()?;
         let mut block = vec![0; block_size as usize];
         reader.read_exact(&mut block)?;
@@ -487,13 +482,13 @@ impl Tree {
     
     fn search_table(&self, level: usize, table: u8, key: &Vec<u8>) -> Result<Option<Vec<u8>>, YAStorageError> {
         // not checking bloom filter yet
-        let mut table = File::open(self.path.clone().join(level.to_string()).join(table.to_string()))?;
+        let mut table: File = File::open(self.path.clone().join(level.to_string()).join(table.to_string()))?;
         let index = Index::deserialize(&table)?;
         let byte_offset = search_index(&index, key);
         if byte_offset.is_none() {
             return Ok(None);
         }
-        table.seek(SeekFrom::Current(byte_offset.unwrap() as i64))?;
+        let byte = table.seek(SeekFrom::Start(byte_offset.unwrap() + 8))?;
         let block = DataBlock::deserialize(&mut table)?;
         for (cantidate_key, value) in block.entries {
             if &cantidate_key == key {
@@ -537,7 +532,6 @@ impl Tree {
         if self.memtable.skipmap.len() == 0 {
             return Ok(());
         }
-        println!("{}", self.memtable.skipmap.len());
         // todo: compaction
         let table_to_write = self.tables_per_level.unwrap()[0];
         let filename = format!("uncommitted{}", table_to_write.to_string());
@@ -571,18 +565,18 @@ impl Tree {
                 data_section.append(&mut current_block);
             }
         }
+
+        table.write_u64::<LittleEndian>(data_section.len() as u64)?;
+        table.write_all(&data_section)?;
         table.write_u64::<LittleEndian>(index.len() as u64)?;
         table.write_all(&index)?;
-        table.write_all(&data_section)?;
         let old_path = self.path.join("0").join(&filename);
         let new_path = self.path.join("0").join(table_to_write.to_string());
         // before we commit the table, update header
-        println!("before tables {}", self.tables_per_level.unwrap()[0]);
         self.tables_per_level.as_mut().unwrap()[0] += 1;
         if self.num_levels.unwrap() == 0 {
             self.num_levels = Some(1);
         }
-        println!("new tables {}", self.tables_per_level.unwrap()[0]);
         fs::write(self.path.join("header"), self.tables_per_level.unwrap())?;
         std::fs::rename(old_path, new_path)?;
         table.sync_all()?;
