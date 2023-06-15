@@ -4,6 +4,7 @@ use std::fs;
 use std::io::Cursor;
 use std::io::Seek;
 use std::io::SeekFrom;
+use std::iter::Peekable;
 use fs::File;
 use std::fs::OpenOptions;
 
@@ -137,6 +138,43 @@ struct Tree {
     path: PathBuf,
     memtable: Memtable,
     wal_file: Option<File>
+}
+
+struct Table {
+    file: File,
+    total_bytes: u64,
+    current_block: Option<DataBlock>,
+    current_block_idx: usize
+}
+impl Table {
+    fn new(path: PathBuf) -> io::Result<Self> {
+        let mut file = File::open(&path)?;
+        let total_bytes = file.read_u64::<LittleEndian>()?;
+        return Ok(Table {
+            file, total_bytes, current_block: None, current_block_idx: 0
+        });
+    }
+}
+impl Iterator for Table {
+    type Item = io::Result<(Vec<u8>, Vec<u8>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_block.is_none() || self.current_block_idx == self.current_block.as_ref().unwrap().entries.len() {
+            if self.total_bytes == self.file.stream_position().unwrap() {
+                // we've reached the end of the datablocks
+                return None;
+            }
+            let current_block = DataBlock::deserialize(&mut self.file);
+            if current_block.is_err() {
+                return Some(Err(current_block.err().unwrap()));
+            }
+            self.current_block = Some(current_block.unwrap());
+            self.current_block_idx = 0;
+        }
+        let kv = self.current_block.as_ref().unwrap().entries[self.current_block_idx].to_owned();
+        self.current_block_idx += 1;
+        return Some(Ok(kv));
+    }
 }
 // bloom filter:
 // during compaction:
@@ -488,7 +526,7 @@ impl Tree {
         if byte_offset.is_none() {
             return Ok(None);
         }
-        let byte = table.seek(SeekFrom::Start(byte_offset.unwrap() + 8))?;
+        table.seek(SeekFrom::Start(byte_offset.unwrap() + 8))?;
         let block = DataBlock::deserialize(&mut table)?;
         for (cantidate_key, value) in block.entries {
             if &cantidate_key == key {
@@ -581,6 +619,54 @@ impl Tree {
         std::fs::rename(old_path, new_path)?;
         table.sync_all()?;
         self.memtable.skipmap = SkipMap::new();
+        if self.tables_per_level.unwrap()[0] == 10 {
+            self.compact()?;
+        }
+        Ok(())
+    }
+    // TODO: wrap this logic in a type, specify tables
+    // for a level, that will be a level iterator for a compaction
+    // for a lsm tree, that is an ordered iterator
+    fn compact_level(&mut self, level: usize) -> Result<(), io::Error> {
+        let file_iterators: Vec<Peekable<Table>> = (0..10).map(|x| Table::new(self.path.join(level.to_string()).join(x.to_string())).map(|x| x.peekable())).collect::<Result<Vec<Peekable<Table>>, io::Error>>()?;
+        while file_iterators.len() != 0 {
+            let mut to_remove  = Vec::new();
+            let mut smallest_key = None;
+            let mut smallest_key_iterators = Vec::new();
+            for mut file_it in file_iterators {
+                let cur_val = file_it.peek();
+                if cur_val.is_none() {
+                    to_remove.push(file_it);
+                    continue;
+                }
+                let cur_kv = cur_val.unwrap();
+                if cur_kv.is_err() {
+                    return Err(file_it.next().unwrap().err().unwrap());
+                }
+                let cur_key = &cur_kv.as_ref().unwrap().0;
+                if smallest_key == None || cur_key < smallest_key {
+                    smallest_key = Some(cur_key);
+                    smallest_key_iterators.clear();
+                    smallest_key_iterators.push(file_it);
+                } else if cur_key == smallest_key.unwrap() {
+                    smallest_key_iterators.push(file_it)
+                }
+            }
+            // clear the expired iterators
+            // if there are no more iterators, break
+            // advance all smallest iterators, extract k/v
+            // append that to datablock/index
+
+        }
+        Ok(())
+    }
+    fn compact(&mut self) -> Result<(), io::Error> {
+        let mut level = 0;
+        // this may fail between compactions, so we need to check if we need to compact on startup
+        while self.tables_per_level.unwrap()[level] == 10 {
+            self.compact_level(level);
+            level += 1;
+        }
         Ok(())
     }
 
