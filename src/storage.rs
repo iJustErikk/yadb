@@ -269,8 +269,27 @@ struct Index {
 // ~2.5 million keys in sparse index
 // way less than 1gb in memory
 impl Index {
-    pub fn deserialize(mut reader: &File) -> Result<Index, io::Error> {
+    pub fn get_num_bytes(&self) -> u64 {
+    let mut res = 0;
+    for (k, _) in self.entries.iter() {
+        res += k.len() as u64;
+        res += 16;
+    }
+    return res;
+}
+    pub fn serialize(&self, mut writer: &File) -> io::Result<()> {
+        writer.write_u64::<LittleEndian>(self.get_num_bytes())?;
+        for (k, offset) in self.entries.iter() {
+            writer.write_u64::<LittleEndian>(k.len() as u64);
+            writer.write_all(&k);
+            writer.write_u64::<LittleEndian>(*offset);
+        }
+        Ok(())
+    }
+    pub fn deserialize(mut reader: &File) -> io::Result<Index> {
         let mut entries = Vec::new();
+        // TODO: is it the caller's responsibility to put the file pointer in the right place or is it this function's
+        // I really should be wrapping these functions with functions in Table- one place to verify on disk structure implementation
         // last 8 bytes are index offset
 
         reader.seek(SeekFrom::End(-8))?;
@@ -302,6 +321,25 @@ struct DataBlock {
 }
 
 impl DataBlock {
+    pub fn get_num_bytes(&self) -> u64 {
+        let mut res = 0;
+        for (k, v) in self.entries.iter() {
+            res += k.len() as u64;
+            res += v.len() as u64;
+            res += 16;
+        }
+        return res;
+    }
+    pub fn serialize(&self, writer: &mut File) -> io::Result<()> {
+        writer.write_u64::<LittleEndian>(self.get_num_bytes());
+        for (k, v) in self.entries.iter() {
+            writer.write_u64::<LittleEndian>(k.len() as u64);
+            writer.write_all(&k);
+            writer.write_u64::<LittleEndian>(v.len() as u64);
+            writer.write_all(&v);
+        }
+        Ok(())
+    }
     pub fn deserialize(reader: &mut File) -> io::Result<Self> {
         let block_size = reader.read_u64::<LittleEndian>()?;
         let mut block = vec![0; block_size as usize];
