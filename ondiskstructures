@@ -1,6 +1,7 @@
 for any ordered bytes, they are converted to little endian for disk or network
 sstable:
 [(block_len, [(key_len as u64, key, value_len as u64, value)])] <- datablocks
+num bytes for sparse index
 [(key_len as u64, key)] <- sparse index
 byte offset for sparse index
 

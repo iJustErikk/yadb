@@ -271,8 +271,11 @@ struct Index {
 impl Index {
     pub fn deserialize(mut reader: &File) -> Result<Index, io::Error> {
         let mut entries = Vec::new();
+        // last 8 bytes are index offset
+
+        reader.seek(SeekFrom::End(-8))?;
         let datablock_size = reader.read_u64::<LittleEndian>()?;
-        reader.seek(SeekFrom::Current(datablock_size as i64))?;
+        reader.seek(SeekFrom::Start(datablock_size))?;
         let index_size = reader.read_u64::<LittleEndian>()?;
         let mut bytes_read = 0;
         while bytes_read != index_size {
@@ -284,6 +287,7 @@ impl Index {
             bytes_read += 2 * u64_num_bytes + key_size;
             entries.push((key, offset));
         }
+        reader.seek(SeekFrom::Start(0))?;
         Ok(Index{entries})
     }
 }
@@ -526,7 +530,7 @@ impl Tree {
         if byte_offset.is_none() {
             return Ok(None);
         }
-        table.seek(SeekFrom::Start(byte_offset.unwrap() + 8))?;
+        table.seek(SeekFrom::Start(byte_offset.unwrap()))?;
         let block = DataBlock::deserialize(&mut table)?;
         for (cantidate_key, value) in block.entries {
             if &cantidate_key == key {
@@ -604,10 +608,11 @@ impl Tree {
             }
         }
 
-        table.write_u64::<LittleEndian>(data_section.len() as u64)?;
         table.write_all(&data_section)?;
         table.write_u64::<LittleEndian>(index.len() as u64)?;
         table.write_all(&index)?;
+        // footer: 8 bytes for index offset
+        table.write_u64::<LittleEndian>(data_section.len() as u64)?;
         let old_path = self.path.join("0").join(&filename);
         let new_path = self.path.join("0").join(table_to_write.to_string());
         // before we commit the table, update header
@@ -677,7 +682,7 @@ impl Tree {
         let mut level = 0;
         // this may fail between compactions, so we need to check if we need to compact on startup
         while self.tables_per_level.unwrap()[level] == 10 {
-            self.compact_level(level);
+            self.compact_level(level)?;
             level += 1;
         }
         Ok(())
