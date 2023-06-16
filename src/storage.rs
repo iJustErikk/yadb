@@ -671,45 +671,48 @@ impl Tree {
     // for a level, that will be a level iterator for a compaction
     // for a lsm tree, that is an ordered iterator
     fn compact_level(&mut self, level: usize) -> Result<(), io::Error> {
-        // let mut file_iterators: Vec<Peekable<Table>> = (0..10).map(|x| Table::new(self.path.join(level.to_string()).join(x.to_string())).map(|x| x.peekable())).collect::<Result<Vec<Peekable<Table>>, io::Error>>()?;
-        // assert!(level != 4);
-        // let new_table = self.tables_per_level.unwrap()[level + 1];
-        // let new_table_path = self.path.join((level + 1).to_string()).join(new_table.to_string());
-        // let mut new_table = File::open(new_table_path)?;
-        // while file_iterators.len() != 0 {
-        //     let mut to_remove  = Vec::new();
-        //     let mut smallest_key = None;
-        //     let mut smallest_key_iterators = Vec::new();
-        //     for (i, mut file_it) in file_iterators.iter_mut().enumerate() {
-        //         let cur_val = file_it.peek();
-        //         if cur_val.is_none() {
-        //             to_remove.push(i);
-        //             continue;
-        //         }
-        //         let cur_kv = cur_val.unwrap();
-        //         if cur_kv.is_err() {
-        //             return Err(file_it.next().unwrap().err().unwrap());
-        //         }
-        //         let cur_key = &cur_kv.as_ref().unwrap().0;
-        //         if smallest_key == None || cur_key < smallest_key.unwrap() {
-        //             smallest_key = Some(cur_key);
-        //             smallest_key_iterators.clear();
-        //             smallest_key_iterators.push(&file_it);
-        //         } else if cur_key == smallest_key.unwrap() {
-        //             smallest_key_iterators.push(&file_it)
-        //         }
-        //     }
-            // file_iterators = file_iterators.into_iter().enumerate().filter(|(i, x)| !to_remove.contains(&i)).map(|(i, x)| x).collect();
-            // if file_iterators.len() == 0 {
-            //     break;
-            // }
-            // let kv = file_iterators[0].next().unwrap().unwrap();
-            // for (i, iter) in smallest_key_iterators.iter().enumerate() {
-            //     iter.next();
-            // }
+        let mut file_iterators: Vec<Peekable<Table>> = (0..10).map(|x| Table::new(self.path.join(level.to_string()).join(x.to_string())).map(|x| x.peekable())).collect::<Result<Vec<Peekable<Table>>, io::Error>>()?;
+        assert!(level != 4);
+        let new_table = self.tables_per_level.unwrap()[level + 1];
+        let new_table_path = self.path.join((level + 1).to_string()).join(new_table.to_string());
+        let mut new_table = File::open(new_table_path)?;
+        while file_iterators.len() != 0 {
+            let mut to_remove  = Vec::new();
+            let mut smallest_key = None;
+            let mut smallest_key_iterators = Vec::new();
+            for (i, mut file_it) in file_iterators.iter_mut().enumerate() {
+                let cur_val = file_it.peek();
+                if cur_val.is_none() {
+                    to_remove.push(i);
+                    continue;
+                }
+                let cur_kv = cur_val.unwrap();
+                if cur_kv.is_err() {
+                    return Err(file_it.next().unwrap().err().unwrap());
+                }
+                let cur_key = &cur_kv.as_ref().unwrap().0;
+                if smallest_key == None || cur_key < smallest_key.unwrap() {
+                    smallest_key = Some(cur_key);
+                    smallest_key_iterators.clear();
+                    smallest_key_iterators.push(&file_it);
+                } else if cur_key == smallest_key.unwrap() {
+                    smallest_key_iterators.push(&file_it)
+                }
+            }
+            file_iterators = file_iterators.into_iter().enumerate().filter(|(i, x)| !to_remove.contains(&i)).map(|(i, x)| x).collect();
+            if file_iterators.len() == 0 {
+                break;
+            }
+            let kv = file_iterators[file_iterators.len() - 1].next().unwrap().unwrap();
+            for (i, iter) in smallest_key_iterators.iter().enumerate() {
+                iter.next();
+            }
+            // TODO: this is exactly the same logic as write_skipmap- if I extract this into something, what is that pattern called?
             // advance all smallest iterators, extract k/v
-
-        // }
+            // if first key in datablock- add key to index w offset (check size of file)
+            // add key to datablock
+            // check if full- if so, flush and make a new datablock
+        }
         // datablocks are done writing, write index
         // update tables_per_level and num_levels
         // flush header
