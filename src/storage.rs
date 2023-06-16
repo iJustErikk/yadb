@@ -140,27 +140,95 @@ struct Tree {
     wal_file: Option<File>
 }
 
+struct MergedTableIterators {
+    tables: Vec<Table>
+}
+
+impl Iterator for MergedTableIterators {
+    type Item = io::Result<(Vec<u8>, Vec<u8>)>;
+    // TODO: for large sets of files (table iterators), use heaps
+    // this implementation is currently only for level iterators (k = 10) -> heap likely is slower
+    // since with small sets of files, the overhead of using heaps is lilely minimal, so could use it in either case
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // todo
+    }
+}
+
 struct Table {
     file: File,
-    total_bytes: u64,
+    total_data_bytes: Option<u64>,
     current_block: Option<DataBlock>,
     current_block_idx: usize
 }
 impl Table {
-    fn new(path: PathBuf) -> io::Result<Self> {
-        let mut file = File::open(&path)?;
-        let total_bytes = file.read_u64::<LittleEndian>()?;
+    fn new(path: PathBuf, reading: bool) -> io::Result<Self> {
+        let mut file = if reading { File::open(&path)? } else { File::create(&path)?};
+        let total_data_bytes = None;
+        if reading {
+            file.seek(SeekFrom::End(-8))?;
+            file.seek(SeekFrom::Start(0));
+            let total_data_bytes = Some(file.read_u64::<LittleEndian>()?);
+        }
         return Ok(Table {
-            file, total_bytes, current_block: None, current_block_idx: 0
+            file, total_data_bytes, current_block: None, current_block_idx: 0
         });
+    }
+    fn get_index(&mut self) -> io::Result<Index> {
+        self.file.seek(SeekFrom::End(-8))?;
+        let datablock_size = self.file.read_u64::<LittleEndian>()?;
+        self.file.seek(SeekFrom::Start(datablock_size))?;
+        return Ok(Index::deserialize(&self.file)?);
+    }
+    fn get_datablock(&mut self, offset: u64) -> io::Result<DataBlock> {
+        self.file.seek(SeekFrom::Start(offset))?;
+        return Ok(DataBlock::deserialize(&mut self.file)?);
+    }
+    
+    fn write_table<I>(&self, it: I) -> io::Result<()>  where I: IntoIterator<Item=(Vec<u8>, Vec<u8>)>, {
+        // TODO: I could convert these to use the serialize function for DataBlock + Index
+        // this would present overhead, as they would most likely be copied into the ds just to be written out
+        // but it would keep the logic for serde in one impl
+        let mut index: Vec<u8> = Vec::new();
+        let mut data_section: Vec<u8> = Vec::new();
+        let mut current_block: Vec<u8> = Vec::new();
+        for (key, value) in it {
+            if current_block.is_empty() {
+                index.write_u64::<LittleEndian>(key.len() as u64)?;
+                index.extend(key);
+                index.write_u64::<LittleEndian>(data_section.len() as u64)?;
+            }
+            current_block.write_u64::<LittleEndian>(key.len() as u64)?;
+            current_block.extend(key);
+            current_block.write_u64::<LittleEndian>(value.len() as u64)?;
+            current_block.extend(value);
+            if current_block.len() > 4_000 {
+                data_section.write_u64::<LittleEndian>(current_block.len() as u64)?;
+                data_section.append(&mut current_block);
+            }
+        }
+        // write last block if not already written
+        if current_block.len() > 0 {
+            data_section.write_u64::<LittleEndian>(current_block.len() as u64)?;
+            data_section.append(&mut current_block);
+        }
+
+        self.file.write_all(&data_section)?;
+        self.file.write_u64::<LittleEndian>(index.len() as u64)?;
+        self.file.write_all(&index)?;
+        // footer: 8 bytes for index offset
+        self.file.write_u64::<LittleEndian>(data_section.len() as u64)?;
+        Ok(())
     }
 }
 impl Iterator for Table {
     type Item = io::Result<(Vec<u8>, Vec<u8>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // we better open this in read mode
+        assert!(self.total_data_bytes.is_some());
         if self.current_block.is_none() || self.current_block_idx == self.current_block.as_ref().unwrap().entries.len() {
-            if self.total_bytes == self.file.stream_position().unwrap() {
+            if self.total_data_bytes.unwrap() == self.file.stream_position().unwrap() {
                 // we've reached the end of the datablocks
                 return None;
             }
@@ -171,7 +239,7 @@ impl Iterator for Table {
             self.current_block = Some(current_block.unwrap());
             self.current_block_idx = 0;
         }
-        let kv = self.current_block.as_ref().unwrap().entries[self.current_block_idx].to_owned();
+        let kv = std::mem::replace(&mut self.current_block.as_ref().unwrap().entries[self.current_block_idx], (Vec::new(), Vec::new()));
         self.current_block_idx += 1;
         return Some(Ok(kv));
     }
@@ -269,7 +337,10 @@ struct Index {
 // ~2.5 million keys in sparse index
 // way less than 1gb in memory
 impl Index {
-    pub fn get_num_bytes(&self) -> u64 {
+    fn new() -> Self {
+        return Index {entries: Vec::new()};
+    }
+    fn get_num_bytes(&self) -> u64 {
     let mut res = 0;
     for (k, _) in self.entries.iter() {
         res += k.len() as u64;
@@ -291,10 +362,6 @@ impl Index {
         // TODO: is it the caller's responsibility to put the file pointer in the right place or is it this function's
         // I really should be wrapping these functions with functions in Table- one place to verify on disk structure implementation
         // last 8 bytes are index offset
-
-        reader.seek(SeekFrom::End(-8))?;
-        let datablock_size = reader.read_u64::<LittleEndian>()?;
-        reader.seek(SeekFrom::Start(datablock_size))?;
         let index_size = reader.read_u64::<LittleEndian>()?;
         let mut bytes_read = 0;
         while bytes_read != index_size {
@@ -306,7 +373,6 @@ impl Index {
             bytes_read += 2 * u64_num_bytes + key_size;
             entries.push((key, offset));
         }
-        reader.seek(SeekFrom::Start(0))?;
         Ok(Index{entries})
     }
 }
@@ -321,6 +387,9 @@ struct DataBlock {
 }
 
 impl DataBlock {
+    fn new() -> Self {
+        return DataBlock {entries: Vec::new()};
+    }
     pub fn get_num_bytes(&self) -> u64 {
         let mut res = 0;
         for (k, v) in self.entries.iter() {
@@ -562,17 +631,16 @@ impl Tree {
     
     fn search_table(&self, level: usize, table: u8, key: &Vec<u8>) -> Result<Option<Vec<u8>>, YAStorageError> {
         // not checking bloom filter yet
-        let mut table: File = File::open(self.path.clone().join(level.to_string()).join(table.to_string()))?;
-        let index = Index::deserialize(&table)?;
+        let mut table: Table = Table::new(self.path.clone().join(level.to_string()).join(table.to_string()))?;
+        let index = table.get_index()?;
         let byte_offset = search_index(&index, key);
         if byte_offset.is_none() {
             return Ok(None);
         }
-        table.seek(SeekFrom::Start(byte_offset.unwrap()))?;
-        let block = DataBlock::deserialize(&mut table)?;
-        for (cantidate_key, value) in block.entries {
-            if &cantidate_key == key {
-                return Ok(Some(value));
+        let mut block = table.get_datablock(byte_offset.unwrap())?;
+        for (cantidate_key, value) in block.entries.iter_mut() {
+            if cantidate_key == key {
+                return Ok(Some(std::mem::replace(value, Vec::new())));
             }
         }
         return Ok(None)
@@ -609,10 +677,6 @@ impl Tree {
     // start calling compaction
     
     fn write_skipmap_as_sstable(&mut self) -> Result<(), io::Error> {
-        if self.memtable.skipmap.len() == 0 {
-            return Ok(());
-        }
-        // todo: compaction
         let table_to_write = self.tables_per_level.unwrap()[0];
         let filename = format!("uncommitted{}", table_to_write.to_string());
         if !self.path.join("0").exists() {
@@ -621,37 +685,14 @@ impl Tree {
         // we better not be overwriting something
         // otherwise we are shooting ourselves in the foot
         assert!(!self.path.join("0").join(&filename).exists());
-        let mut table = File::create(self.path.join("0").join(&filename))?;
 
-        let mut index: Vec<u8> = Vec::new();
-        let mut data_section: Vec<u8> = Vec::new();
-        let mut current_block: Vec<u8> = Vec::new();
-        let mut keys_visited = 0;
-        for entry in &self.memtable.skipmap {
-            let key = entry.key();
-            let value = entry.value();
-            keys_visited += 1;
-            if current_block.is_empty() {
-                index.write_u64::<LittleEndian>(key.len() as u64)?;
-                index.extend(key);
-                index.write_u64::<LittleEndian>(data_section.len() as u64)?;
-            }
-            current_block.write_u64::<LittleEndian>(key.len() as u64)?;
-            current_block.extend(key);
-            current_block.write_u64::<LittleEndian>(value.len() as u64)?;
-            current_block.extend(value);
-            if current_block.len() > 4_000 || keys_visited == self.memtable.skipmap.len() {
-                data_section.write_u64::<LittleEndian>(current_block.len() as u64)?;
-                data_section.append(&mut current_block);
-            }
-        }
-
-        table.write_all(&data_section)?;
-        table.write_u64::<LittleEndian>(index.len() as u64)?;
-        table.write_all(&index)?;
-        // footer: 8 bytes for index offset
-        table.write_u64::<LittleEndian>(data_section.len() as u64)?;
+        // TODO: begin write by creating table, then passing iterator for writing
         let old_path = self.path.join("0").join(&filename);
+        let table = Table::new(old_path, false)?;
+        table.write_table(self.memtable.skipmap.into_iter());
+
+        // TODO: this stuff is similar to what will be in compaction- this should be inside of table
+        // call it commit_table- should be fine to call inside of write_table
         let new_path = self.path.join("0").join(table_to_write.to_string());
         // before we commit the table, update header
         self.tables_per_level.as_mut().unwrap()[0] += 1;
@@ -660,7 +701,7 @@ impl Tree {
         }
         fs::write(self.path.join("header"), self.tables_per_level.unwrap())?;
         std::fs::rename(old_path, new_path)?;
-        table.sync_all()?;
+        table.file.sync_all()?;
         self.memtable.skipmap = SkipMap::new();
         if self.tables_per_level.unwrap()[0] == 10 {
             self.compact()?;
@@ -782,7 +823,10 @@ impl Tree {
         // split these up, as adding the difference causes overflow on deletes
         self.memtable.size += new_size;
         self.memtable.size -= old_size;
-        // TODO: too many copies- this may need to be optimized
+        // TODO: I could remove the copies one of two ways:
+        // - take ownership of kv (will the end user want this?)
+        // - work with references (this will put the effort on the end user)
+        // right now, copying sounds best as it avoids making the user keep the kv in memory or having to copy into this function
         if operation == Operation::PUT {
             self.memtable.skipmap.insert(key.to_vec(), value.to_vec());
         } else if operation == Operation::DELETE {
