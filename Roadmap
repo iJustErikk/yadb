@@ -8,6 +8,7 @@ TODO:
 - profile and see what is taking so long
 - implement filter/index/block cache
 
+- make code structure follow rust file structure
 - asyncify code (use tokio)
 - eliminate needless copies
 - implement custom merge operator
