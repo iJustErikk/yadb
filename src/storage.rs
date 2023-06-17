@@ -6,10 +6,10 @@ use std::io::Cursor;
 use std::io::Seek;
 use std::io::SeekFrom;
 use std::iter::Peekable;
+use std::mem;
 use fs::File;
 use std::fs::OpenOptions;
 
-use fs::remove_file;
 use std::path::PathBuf;
 use std::error::Error;
 
@@ -27,7 +27,6 @@ use std::collections::BinaryHeap;
 extern crate crossbeam_skiplist;
 use crossbeam_skiplist::SkipMap;
 extern crate tempfile;
-use tempfile::tempdir;
 
 
 // on tuning bloom filters:
@@ -92,6 +91,11 @@ use tempfile::tempdir;
 // TODO: add more errors
 // I'm wrapping IOError for now, but this is not useful for the end user.
 // the user is going to want specific, actionable errors
+
+// Magic vars (figure out how to make these configurable)
+const TABLES_UNTIL_COMPACTION: u8 = 3;
+const BLOCK_SIZE: usize = 4_000;
+const MAX_MEMTABLE_SIZE: usize = 1_000_000;
 #[derive(Debug)]
 enum YAStorageError {
     IOError {error: io::Error},
@@ -149,6 +153,7 @@ struct MergedTableIterators {
 }
 
 struct TableNum {
+    // we are using refcell so we can peek
     table: RefCell<Peekable<Table>>, 
     num: usize
 }
@@ -180,13 +185,23 @@ impl Ord for TableNum {
         // if there is an error, we unfortunately cannot return it
         // TODO: cannot find an errable heap implementation, will need to spin one up
         // could very messily make errors less than non errors and then handle an error when popping
-        let first = (first.unwrap().unwrap().0, self.num);
-        let second = (second.unwrap().unwrap().0, other.num);
+        let first = &(match first {
+            Some(Ok(first)) => Some(first),
+            // won't happen
+            _ => None
+        }.unwrap().0);
+        let second = &(match second {
+            Some(Ok(second)) => Some(second),
+            // won't happen
+            _ => None
+        }.unwrap().0);
+        let first = (first, self.num);
+        let second = (second, other.num);
         // order first by peeked key ref, then by table number (higher is younger and higher)
         // we want this to be a min heap
         // order first by key (smaller key means greater)
         // then order by table number (smaller table number means greater)
-        
+        // TODO: custom comparators
         if first < second {
             std::cmp::Ordering::Greater
         } else if first > second {
@@ -225,7 +240,9 @@ impl Iterator for MergedTableIterators {
         if self.heap.is_empty() {
             return None;
         }
-        let res = self.heap.pop().unwrap().table.borrow_mut().next();
+        let popped_value = self.heap.pop().unwrap();
+        let mut table = popped_value.table.borrow_mut();
+        let res = table.next();
         // we will not put back an empty iterator and if an iterator produced an error, we would have panicked before
         assert!((&res).is_some());
         let res = res.unwrap();
@@ -243,13 +260,18 @@ struct Table {
 }
 impl Table {
     fn new(path: PathBuf, reading: bool) -> io::Result<Self> {
-        // TODO: create file if it does not exist
+        if !reading && !path.parent().unwrap().exists() {
+            fs::create_dir(path.parent().unwrap())?;
+        }
         let mut file = if reading { File::open(&path)? } else { File::create(&path)?};
         let total_data_bytes = None;
         if reading {
             file.seek(SeekFrom::End(-8))?;
-            file.seek(SeekFrom::Start(0));
             let total_data_bytes = Some(file.read_u64::<LittleEndian>()?);
+            file.seek(SeekFrom::Start(0))?;
+            return Ok(Table {
+                file, total_data_bytes, current_block: None, current_block_idx: 0
+            })
         }
         return Ok(Table {
             file, total_data_bytes, current_block: None, current_block_idx: 0
@@ -279,11 +301,14 @@ impl Table {
                 index.extend(&key);
                 index.write_u64::<LittleEndian>(data_section.len() as u64)?;
             }
+            // TODO: this will pack things into blocks until they exceed 4kb
+            // that means most reads will be 2 blocks
+            // no bueno, fix this
             current_block.write_u64::<LittleEndian>(key.len() as u64)?;
             current_block.extend(key);
             current_block.write_u64::<LittleEndian>(value.len() as u64)?;
             current_block.extend(value);
-            if current_block.len() >= 4_000 {
+            if current_block.len() >= BLOCK_SIZE {
                 data_section.write_u64::<LittleEndian>(current_block.len() as u64)?;
                 data_section.append(&mut current_block);
             }
@@ -299,6 +324,7 @@ impl Table {
         self.file.write_all(&index)?;
         // footer: 8 bytes for index offset
         self.file.write_u64::<LittleEndian>(data_section.len() as u64)?;
+        self.file.sync_all()?;
         Ok(())
     }
 }
@@ -432,9 +458,9 @@ impl Index {
     pub fn serialize(&self, mut writer: &File) -> io::Result<()> {
         writer.write_u64::<LittleEndian>(self.get_num_bytes())?;
         for (k, offset) in self.entries.iter() {
-            writer.write_u64::<LittleEndian>(k.len() as u64);
-            writer.write_all(&k);
-            writer.write_u64::<LittleEndian>(*offset);
+            writer.write_u64::<LittleEndian>(k.len() as u64)?;
+            writer.write_all(&k)?;
+            writer.write_u64::<LittleEndian>(*offset)?;
         }
         Ok(())
     }
@@ -481,18 +507,18 @@ impl DataBlock {
         return res;
     }
     pub fn serialize(&self, writer: &mut File) -> io::Result<()> {
-        writer.write_u64::<LittleEndian>(self.get_num_bytes());
+        writer.write_u64::<LittleEndian>(self.get_num_bytes())?;
         for (k, v) in self.entries.iter() {
-            writer.write_u64::<LittleEndian>(k.len() as u64);
-            writer.write_all(&k);
-            writer.write_u64::<LittleEndian>(v.len() as u64);
-            writer.write_all(&v);
+            writer.write_u64::<LittleEndian>(k.len() as u64)?;
+            writer.write_all(&k)?;
+            writer.write_u64::<LittleEndian>(v.len() as u64)?;
+            writer.write_all(&v)?;
         }
         Ok(())
     }
     pub fn deserialize(reader: &mut File) -> io::Result<Self> {
         let block_size = reader.read_u64::<LittleEndian>()?;
-        let mut block = vec![0; block_size as usize];
+        let mut block = vec![0; BLOCK_SIZE as usize];
         reader.read_exact(&mut block)?;
         let block_len = block.len();
         let mut cursor = Cursor::new(block);
@@ -569,9 +595,11 @@ impl Tree {
     pub fn init(&mut self) -> Result<(), YAStorageError> {
         self.init_folder()?;
 
+
         self.general_sanity_check()?;
 
-        self.restore_wal()?;
+        self.restore_wal()?;        
+
         Ok(())
     }
     fn init_folder(&mut self) -> Result<(), YAStorageError> {
@@ -603,6 +631,7 @@ impl Tree {
             let mut file = File::open(self.path.clone().join("header"))?;
             // if this fails, alert the user with YAStorageError, corrupted header
             file.read_exact(&mut buffer)?;
+            println!("{}", buffer[1]);
             self.tables_per_level = Some(buffer);
             self.wal_file = Some(OpenOptions::new()
             .read(true)
@@ -739,8 +768,8 @@ impl Tree {
 
         // TODO: begin write by creating table, then passing iterator for writing
         let new_path = self.path.join("0").join(table_to_write.to_string());
-        let table = Table::new(new_path, false)?;
-        table.write_table(self.memtable.skipmap.into_iter());
+        let mut table = Table::new(new_path, false)?;
+        table.write_table(mem::replace(&mut self.memtable.skipmap, SkipMap::new()).into_iter())?;
 
         self.tables_per_level.as_mut().unwrap()[0] += 1;
         if self.num_levels.unwrap() == 0 {
@@ -749,7 +778,7 @@ impl Tree {
         // TODO: this should syncdata
         fs::write(self.path.join("header"), self.tables_per_level.unwrap())?;
         self.memtable.skipmap = SkipMap::new();
-        if self.tables_per_level.unwrap()[0] == 10 {
+        if self.tables_per_level.unwrap()[0] == TABLES_UNTIL_COMPACTION {
             self.compact()?;
         }
         Ok(())
@@ -758,9 +787,12 @@ impl Tree {
     fn compact_level(&mut self, level: usize) -> Result<(), io::Error> {
         assert!(level != 4);
         let new_table = self.tables_per_level.unwrap()[level + 1];
+        println!("{}", new_table);
         let new_table_path = self.path.join((level + 1).to_string()).join(new_table.to_string());
+        println!("{}, ", new_table_path.to_str().unwrap());
+        let np = new_table_path.clone();
         let mut table = Table::new(new_table_path, false)?;
-        table.write_table(MergedTableIterators::new((0..10).map(|x| Table::new(self.path.join(level.to_string()).join(x.to_string()), true)).collect::<io::Result<Vec<Table>>>()?));
+        table.write_table(MergedTableIterators::new((0..TABLES_UNTIL_COMPACTION).map(|x| Table::new(self.path.join(level.to_string()).join(x.to_string()), true)).collect::<io::Result<Vec<Table>>>()?))?;
         // TODO: the commit tables scheme only works for writing single sstables
         // for compaction, there is a new failure point: between writing the table and deleting the old level
         // if this fails, on init, the database will recompact the old files and duplicate the data
@@ -771,13 +803,14 @@ impl Tree {
         } 
         self.tables_per_level.unwrap()[level + 1] += 1;
         fs::remove_dir_all(self.path.join(level.to_string()))?;
+        println!("{}", np.exists());
         fs::write(self.path.join("header"), self.tables_per_level.unwrap())?;
         Ok(())
     }
     fn compact(&mut self) -> Result<(), io::Error> {
         let mut level = 0;
         // this may fail between compactions, so we need to check if we need to compact on startup
-        while self.tables_per_level.unwrap()[level] == 10 {
+        while self.tables_per_level.unwrap()[level] == TABLES_UNTIL_COMPACTION {
             self.compact_level(level)?;
             level += 1;
         }
@@ -806,6 +839,9 @@ impl Tree {
                     }
                 }
             }
+        }
+        if entries.len() == 0 {
+            return Ok(());
         }
         
 
@@ -850,7 +886,7 @@ impl Tree {
         self.append_to_wal(WALEntry { operation, key: key.to_vec(), value: value.to_vec() })?;
         // TODO: no magic values
         // add config setting
-        if self.memtable.size > 1_000_000 {
+        if self.memtable.size > MAX_MEMTABLE_SIZE {
             self.write_skipmap_as_sstable()?;
             self.memtable.skipmap = SkipMap::new();
             // wal persisted, truncate now
@@ -893,14 +929,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut tree = Tree::new("./yadb");
     tree.init()?;
     println!("init");
-    let repeats = 1000;
-    for i in 1..repeats {
-        // println!("{}", i);
-        let key = i.to_string();
-        let value = 0.to_string();
-        tree.get(&(key.as_bytes().to_vec()))?;
-        tree.put(&(key.as_bytes().to_vec()), &(value.as_bytes().to_vec()))?;
-        tree.delete(&(key.as_bytes().to_vec()))?;
+    let repeats = 219;
+    for x in 0..4 {
+        for i in 1..repeats {
+            // println!("{}", i);
+            let key = i.to_string();
+            let value = 0.to_string();
+            tree.get(&(key.as_bytes().to_vec()))?;
+            tree.put(&(key.as_bytes().to_vec()), &(value.as_bytes().to_vec()))?;
+            tree.delete(&(key.as_bytes().to_vec()))?;
+        }
+        let mut tree = Tree::new("./yadb");
+        tree.init()?;
     }
     
     Ok(())
@@ -913,6 +953,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod init_tests {
     use std::fs::{create_dir, remove_dir};
+    use fs::remove_file;
+    use tempfile::tempdir;
+
     use super::*;
     // TODO: these check for the existence of some error
     // however, they should check for the particular error that arises
