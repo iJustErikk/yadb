@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 // lsm based storage engine
 // level compaction whenever level hits 10 sstables
 use std::fs;
@@ -148,7 +149,7 @@ struct MergedTableIterators {
 }
 
 struct TableNum {
-    table: Peekable<Table>, 
+    table: RefCell<Peekable<Table>>, 
     num: usize
 }
 
@@ -169,8 +170,10 @@ impl PartialOrd for TableNum {
 
 impl Ord for TableNum {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        let first = self.table.peek();
-        let second = other.table.peek();
+        let mut first_table = self.table.borrow_mut();
+        let mut second_table = other.table.borrow_mut();
+        let first = first_table.peek();
+        let second = second_table.peek();
         // we will not push a empty iterator back into the heap
         assert!(first.is_some());
         assert!(second.is_some());
@@ -206,7 +209,7 @@ impl MergedTableIterators {
     fn new(tables: Vec<Table>) -> Self {
         let mut heap: BinaryHeap<TableNum> = BinaryHeap::new();
         for (num, table) in tables.into_iter().enumerate() {
-            heap.push(TableNum{table: table.peekable(), num});
+            heap.push(TableNum{table: RefCell::new(table.peekable()), num});
         }
         return MergedTableIterators { heap }
     }
@@ -222,10 +225,12 @@ impl Iterator for MergedTableIterators {
         if self.heap.is_empty() {
             return None;
         }
-        let res = self.heap.pop().unwrap().table.next();
+        let res = self.heap.pop().unwrap().table.borrow_mut().next();
         // we will not put back an empty iterator and if an iterator produced an error, we would have panicked before
-        assert!(res.is_some() && res.unwrap().is_ok());
-        let res = res.unwrap().unwrap();
+        assert!((&res).is_some());
+        let res = res.unwrap();
+        assert!((&res).is_ok());
+        let res = res.unwrap();
         Some(res)
     }
 }
@@ -238,6 +243,7 @@ struct Table {
 }
 impl Table {
     fn new(path: PathBuf, reading: bool) -> io::Result<Self> {
+        // TODO: create file if it does not exist
         let mut file = if reading { File::open(&path)? } else { File::create(&path)?};
         let total_data_bytes = None;
         if reading {
@@ -260,7 +266,7 @@ impl Table {
         return Ok(DataBlock::deserialize(&mut self.file)?);
     }
     
-    fn write_table<I>(&self, it: I) -> io::Result<()>  where I: IntoIterator<Item=(Vec<u8>, Vec<u8>)>, {
+    fn write_table<I>(&mut self, it: I) -> io::Result<()>  where I: IntoIterator<Item=(Vec<u8>, Vec<u8>)>, {
         // TODO: I could convert these to use the serialize function for DataBlock + Index
         // this would present overhead, as they would most likely be copied into the ds just to be written out
         // but it would keep the logic for serde in one impl
@@ -270,14 +276,14 @@ impl Table {
         for (key, value) in it {
             if current_block.is_empty() {
                 index.write_u64::<LittleEndian>(key.len() as u64)?;
-                index.extend(key);
+                index.extend(&key);
                 index.write_u64::<LittleEndian>(data_section.len() as u64)?;
             }
             current_block.write_u64::<LittleEndian>(key.len() as u64)?;
             current_block.extend(key);
             current_block.write_u64::<LittleEndian>(value.len() as u64)?;
             current_block.extend(value);
-            if current_block.len() > 4_000 {
+            if current_block.len() >= 4_000 {
                 data_section.write_u64::<LittleEndian>(current_block.len() as u64)?;
                 data_section.append(&mut current_block);
             }
@@ -314,7 +320,7 @@ impl Iterator for Table {
             self.current_block = Some(current_block.unwrap());
             self.current_block_idx = 0;
         }
-        let kv = std::mem::replace(&mut self.current_block.as_ref().unwrap().entries[self.current_block_idx], (Vec::new(), Vec::new()));
+        let kv = std::mem::replace(&mut self.current_block.as_mut().unwrap().entries[self.current_block_idx], (Vec::new(), Vec::new()));
         self.current_block_idx += 1;
         return Some(Ok(kv));
     }
@@ -556,21 +562,12 @@ struct Memtable {
     size: usize
 }
 
-// init: user will specify a folder
-// if empty, init
-// if does not have all files, exit
-// otherwise init from those, if header disagrees with file state, cleanup the uncommitted files (could be from a failed flush or compaction)
-// run the WAL log
-// that folder will contain a header file, a WAL file named wal and folders 0, 1, 2, 3... containing corresponing levels of sstables
-// those folders will contain files named 0, 1, 2, 3... containing sstables of increasing recency
 impl Tree {
     pub fn new(path: &str) -> Self{
         return Tree {num_levels: None, wal_file: None, tables_per_level: None, path: PathBuf::from(path), memtable: Memtable{skipmap: SkipMap::new(), size: 0}};
     }
     pub fn init(&mut self) -> Result<(), YAStorageError> {
         self.init_folder()?;
-
-        self.cleanup_uncommitted()?;
 
         self.general_sanity_check()?;
 
@@ -612,27 +609,6 @@ impl Tree {
             .write(true)
             .append(true)
             .open(self.path.clone().join("wal"))?);
-        }
-        Ok(())
-    }
-    // TODO: custom error and help steps as above
-    // failure may happen in startup (wal replay), compaction or memtable flush
-    // cleanup after failure
-    fn cleanup_uncommitted(&self) -> Result<(), YAStorageError>  {
-        for entry_result in fs::read_dir(&self.path)? {
-            let entry = entry_result?;
-            if entry.file_type()?.is_dir() {
-                for sub_entry_result in fs::read_dir(entry.path())? {
-                    let sub_entry = sub_entry_result?;
-                    if sub_entry.file_type()?.is_file() && sub_entry.file_name().into_string().unwrap().starts_with("uncommitted") {
-                        remove_file(&sub_entry.path())?;
-                        if fs::read_dir(sub_entry.path().parent().unwrap())?.next().is_none() {
-                            // if this folder is now empty, delete it
-                            fs::remove_dir_all(sub_entry.path().parent().unwrap())?;
-                        }
-                    }
-                }
-            }
         }
         Ok(())
     }
@@ -706,7 +682,7 @@ impl Tree {
     
     fn search_table(&self, level: usize, table: u8, key: &Vec<u8>) -> Result<Option<Vec<u8>>, YAStorageError> {
         // not checking bloom filter yet
-        let mut table: Table = Table::new(self.path.clone().join(level.to_string()).join(table.to_string()))?;
+        let mut table: Table = Table::new(self.path.clone().join(level.to_string()).join(table.to_string()), true)?;
         let index = table.get_index()?;
         let byte_offset = search_index(&index, key);
         if byte_offset.is_none() {
@@ -753,30 +729,25 @@ impl Tree {
     
     fn write_skipmap_as_sstable(&mut self) -> Result<(), io::Error> {
         let table_to_write = self.tables_per_level.unwrap()[0];
-        let filename = format!("uncommitted{}", table_to_write.to_string());
         if !self.path.join("0").exists() {
             fs::create_dir(self.path.join("0"))?;
         }
+        let filename = self.tables_per_level.unwrap()[0];
         // we better not be overwriting something
         // otherwise we are shooting ourselves in the foot
-        assert!(!self.path.join("0").join(&filename).exists());
+        assert!(!self.path.join("0").join(filename.to_string()).exists());
 
         // TODO: begin write by creating table, then passing iterator for writing
-        let old_path = self.path.join("0").join(&filename);
-        let table = Table::new(old_path, false)?;
+        let new_path = self.path.join("0").join(table_to_write.to_string());
+        let table = Table::new(new_path, false)?;
         table.write_table(self.memtable.skipmap.into_iter());
 
-        // TODO: this stuff is similar to what will be in compaction- this should be inside of table
-        // call it commit_table- should be fine to call inside of write_table
-        let new_path = self.path.join("0").join(table_to_write.to_string());
-        // before we commit the table, update header
         self.tables_per_level.as_mut().unwrap()[0] += 1;
         if self.num_levels.unwrap() == 0 {
             self.num_levels = Some(1);
         }
+        // TODO: this should syncdata
         fs::write(self.path.join("header"), self.tables_per_level.unwrap())?;
-        std::fs::rename(old_path, new_path)?;
-        table.file.sync_all()?;
         self.memtable.skipmap = SkipMap::new();
         if self.tables_per_level.unwrap()[0] == 10 {
             self.compact()?;
@@ -788,14 +759,19 @@ impl Tree {
         assert!(level != 4);
         let new_table = self.tables_per_level.unwrap()[level + 1];
         let new_table_path = self.path.join((level + 1).to_string()).join(new_table.to_string());
-        let table = Table::new(new_table_path, true)?;
-        table.write_table(MergedTableIterators::new((0..10).map())
-        // create new table, merged table iterators
-        // finish writing file with merged table iterators
-        // commit table
-        // update tables_per_level and num_levels
-        // flush header
-        // done!
+        let mut table = Table::new(new_table_path, false)?;
+        table.write_table(MergedTableIterators::new((0..10).map(|x| Table::new(self.path.join(level.to_string()).join(x.to_string()), true)).collect::<io::Result<Vec<Table>>>()?));
+        // TODO: the commit tables scheme only works for writing single sstables
+        // for compaction, there is a new failure point: between writing the table and deleting the old level
+        // if this fails, on init, the database will recompact the old files and duplicate the data
+        // this does not impact correctness (latest table would be read first), but space performance and write performance (compaction happens sooner)
+        self.tables_per_level.unwrap()[level] = 0;
+        if self.tables_per_level.unwrap()[level + 1] == 0 {
+            self.num_levels = Some(self.num_levels.unwrap() + 1);
+        } 
+        self.tables_per_level.unwrap()[level + 1] += 1;
+        fs::remove_dir_all(self.path.join(level.to_string()))?;
+        fs::write(self.path.join("header"), self.tables_per_level.unwrap())?;
         Ok(())
     }
     fn compact(&mut self) -> Result<(), io::Error> {
