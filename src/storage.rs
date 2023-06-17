@@ -20,6 +20,9 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{self};
 use std::convert::TryFrom;
 
+use std::collections::BinaryHeap;
+
+
 extern crate crossbeam_skiplist;
 use crossbeam_skiplist::SkipMap;
 extern crate tempfile;
@@ -141,17 +144,89 @@ struct Tree {
 }
 
 struct MergedTableIterators {
-    tables: Vec<Table>
+    heap: BinaryHeap<TableNum>
+}
+
+struct TableNum {
+    table: Peekable<Table>, 
+    num: usize
+}
+
+impl Eq for TableNum {}
+
+
+impl PartialEq for TableNum {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+
+impl PartialOrd for TableNum {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TableNum {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let first = self.table.peek();
+        let second = other.table.peek();
+        // we will not push a empty iterator back into the heap
+        assert!(first.is_some());
+        assert!(second.is_some());
+        // if there is an error, we unfortunately cannot return it
+        // TODO: cannot find an errable heap implementation, will need to spin one up
+        // could very messily make errors less than non errors and then handle an error when popping
+        let first = (first.unwrap().unwrap().0, self.num);
+        let second = (second.unwrap().unwrap().0, other.num);
+        // order first by peeked key ref, then by table number (higher is younger and higher)
+        // we want this to be a min heap
+        // order first by key (smaller key means greater)
+        // then order by table number (smaller table number means greater)
+        
+        if first < second {
+            std::cmp::Ordering::Greater
+        } else if first > second {
+            std::cmp::Ordering::Less
+        } else if self.num < other.num {
+            std::cmp::Ordering::Greater
+        } else if self.num > other.num {
+            std::cmp::Ordering::Less
+        } else {
+            // else does not happen
+            // this will not panic
+            // (this would happen if keys are equal and the table numbers are as well)
+            // that could not possibly happen as we use enumerate
+            panic!();
+        }
+    }
+}
+
+impl MergedTableIterators {
+    fn new(tables: Vec<Table>) -> Self {
+        let mut heap: BinaryHeap<TableNum> = BinaryHeap::new();
+        for (num, table) in tables.into_iter().enumerate() {
+            heap.push(TableNum{table: table.peekable(), num});
+        }
+        return MergedTableIterators { heap }
+    }
 }
 
 impl Iterator for MergedTableIterators {
-    type Item = io::Result<(Vec<u8>, Vec<u8>)>;
+    type Item = (Vec<u8>, Vec<u8>);
     // TODO: for large sets of files (table iterators), use heaps
     // this implementation is currently only for level iterators (k = 10) -> heap likely is slower
     // since with small sets of files, the overhead of using heaps is lilely minimal, so could use it in either case
 
     fn next(&mut self) -> Option<Self::Item> {
-        // todo
+        if self.heap.is_empty() {
+            return None;
+        }
+        let res = self.heap.pop().unwrap().table.next();
+        // we will not put back an empty iterator and if an iterator produced an error, we would have panicked before
+        assert!(res.is_some() && res.unwrap().is_ok());
+        let res = res.unwrap().unwrap();
+        Some(res)
     }
 }
 
