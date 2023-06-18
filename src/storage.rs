@@ -920,9 +920,6 @@ impl Tree {
 // batch io
 
 // testing only
-// need to get test suite going
-// haha print does not flush
-// reminds me of the good ole days
 fn main() -> Result<(), Box<dyn Error>> {
     let mut tree = Tree::new("./yadb");
     tree.init()?;

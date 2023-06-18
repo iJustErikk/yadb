@@ -1,0 +1,22 @@
+Right now, a benchmark that reads/writes/updates 219 short k/v runs at 150 ops/second.
+^^ this is on codespaces. I believe running this on a cloud environment reduces the precise accuracy of performance. However, 150 ops/second is fairly consistent.
+
+I'd like to improve this to at least 1000 ops/second. Maybe higher. This needs to be able to be used to operate database workloads.
+
+After running a flamegraph profile, I notice the following:
+- runtime is dominated by write calls (particularly file sync). 85% of runtime is write calls.
+- I notice writing u8 write calls take a lot of runtime.
+- read fs calls take up < 1% of runtime
+
+Analysis:
+Read fs calls take up such a small part of runtime, so caching is not the right after to improving performance (at least for right now).
+
+U8 write fs calls take up way more runtime than other write calls. I should try writing everything at once. Maybe that will help?
+
+Concurrently writing to the file absolutely will not help with performance. However, many operations can be written at once.
+
+
+TODO:
+
+See if writing to a cursor and then to the file helps
+Profile performance on a non-cloud environment
