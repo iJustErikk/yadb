@@ -32,32 +32,11 @@ extern crate tempfile;
 // on tuning bloom filters:
 // given a target false positive probability, we can calculate how many hash functions/bits per key we need
 // cockroach's pebble uses 10, and they say that yields a 1% false positive rate
-// that sounds like a reasonable default
+// that sounds like a reasonable default. we can add an extra section into the sstable for table statistics
+// have a statistic for number of (unique) keys
+// that way, the bloom filter overestimation is no more than double the number of actual unique keys
 // ^^ this can be the size of the skipmap or easily be calculated during compaction
 // i also would like to avoid rehashing during compaction
-
-
-// solution: make the index go after the datablock
-// compaction algorithm:
-// walk through each of the 10 files
-// find smallest key of oldest file, add it to datablock creator
-// datablock creator will overwrite a key if it is fed the same key (thus taking the younger one)
-// if the current block size exceeds the limit, it will create a new block
-// the first item of a block is added to the index
-// we'll immediately write the data block
-// then we write the index
-// this allows us to avoid a two pass read during compaction
-// unfortunately, it adds another io to reads (read the size of the datablock, skip that number of bytes)
-// we could just cache that number, it is basically free (4 bytes)
-// we could also cache the index, this may be infeasible. let's assume a key is 10% the number of bytes as the value and that 1% of keys in a 
-// data block are represented in the sparse index
-// then the index is roughly 1/1000 the size of the data block
-// if we have terabytes on disk, that would be gigabytes in memory
-// that is actually reasonable
-// we could just cache what matters (lru)
-// and we could cache compressed keys
-// maybe we could have a compression function that preserves the ordering (this seems difficult)
-// or we could just compress/decompress if memory gets too full (lots of cpu- this could be parallelized)
 
 
 // metrics:
@@ -221,12 +200,19 @@ impl Ord for TableNum {
 }
 
 impl MergedTableIterators {
-    fn new(tables: Vec<Table>) -> Self {
+    fn new(tables: Vec<Table>) -> io::Result<Self> {
         let mut heap: BinaryHeap<TableNum> = BinaryHeap::new();
         for (num, table) in tables.into_iter().enumerate() {
-            heap.push(TableNum{table: RefCell::new(table.peekable()), num});
+            let mut peekable_table = table.peekable();
+            let first_res = peekable_table.peek();
+            assert!(first_res.is_some());
+            if first_res.unwrap().is_err() {
+                let next = peekable_table.next().unwrap().err().unwrap();
+                return Err(next);
+            }
+            heap.push(TableNum{table: RefCell::new(peekable_table), num});
         }
-        return MergedTableIterators { heap }
+        return Ok(MergedTableIterators { heap })
     }
 }
 
@@ -241,13 +227,18 @@ impl Iterator for MergedTableIterators {
             return None;
         }
         let popped_value = self.heap.pop().unwrap();
-        let mut table = popped_value.table.borrow_mut();
-        let res = table.next();
-        // we will not put back an empty iterator and if an iterator produced an error, we would have panicked before
-        assert!((&res).is_some());
-        let res = res.unwrap();
-        assert!((&res).is_ok());
-        let res = res.unwrap();
+        let (res, should_push) = {
+            let mut table = popped_value.table.borrow_mut();
+            let res = table.next();
+            // we will not put back an empty iterator and if an iterator produced an error, we would have panicked before
+            assert!((&res).is_some());
+            let res = res.unwrap();
+            assert!((&res).is_ok());
+            (res.unwrap(), table.peek().is_some())
+        };
+        if should_push {
+            self.heap.push(popped_value);
+        }
         Some(res)
     }
 }
@@ -790,9 +781,8 @@ impl Tree {
         println!("{}", new_table);
         let new_table_path = self.path.join((level + 1).to_string()).join(new_table.to_string());
         println!("{}, ", new_table_path.to_str().unwrap());
-        let np = new_table_path.clone();
         let mut table = Table::new(new_table_path, false)?;
-        table.write_table(MergedTableIterators::new((0..TABLES_UNTIL_COMPACTION).map(|x| Table::new(self.path.join(level.to_string()).join(x.to_string()), true)).collect::<io::Result<Vec<Table>>>()?))?;
+        table.write_table(MergedTableIterators::new((0..TABLES_UNTIL_COMPACTION).map(|x| Table::new(self.path.join(level.to_string()).join(x.to_string()), true)).collect::<io::Result<Vec<Table>>>()?)?)?;
         // TODO: the commit tables scheme only works for writing single sstables
         // for compaction, there is a new failure point: between writing the table and deleting the old level
         // if this fails, on init, the database will recompact the old files and duplicate the data
@@ -803,7 +793,11 @@ impl Tree {
         } 
         self.tables_per_level.unwrap()[level + 1] += 1;
         fs::remove_dir_all(self.path.join(level.to_string()))?;
-        println!("{}", np.exists());
+        let paths = fs::read_dir(self.path.as_path()).unwrap();
+
+        for path in paths {
+            println!("path {}", path.unwrap().path().display());
+        }        
         fs::write(self.path.join("header"), self.tables_per_level.unwrap())?;
         Ok(())
     }
