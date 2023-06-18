@@ -509,7 +509,7 @@ impl DataBlock {
     }
     pub fn deserialize(reader: &mut File) -> io::Result<Self> {
         let block_size = reader.read_u64::<LittleEndian>()?;
-        let mut block = vec![0; BLOCK_SIZE as usize];
+        let mut block = vec![0; block_size as usize];
         reader.read_exact(&mut block)?;
         let block_len = block.len();
         let mut cursor = Cursor::new(block);
@@ -741,13 +741,9 @@ impl Tree {
         }
         return Ok(None);
     }
-    fn get_next_sstable_location() {
-
-    }
-    // convert skipmap to sstable
-    // start calling compaction
     
-    fn write_skipmap_as_sstable(&mut self) -> Result<(), io::Error> {
+    fn write_skipmap_as_sstable(&mut self) -> io::Result<()> {
+        let paths = fs::read_dir(self.path.as_path()).unwrap();
         let table_to_write = self.tables_per_level.unwrap()[0];
         if !self.path.join("0").exists() {
             fs::create_dir(self.path.join("0"))?;
@@ -760,22 +756,30 @@ impl Tree {
         // TODO: begin write by creating table, then passing iterator for writing
         let new_path = self.path.join("0").join(table_to_write.to_string());
         let mut table = Table::new(new_path, false)?;
+        
         table.write_table(mem::replace(&mut self.memtable.skipmap, SkipMap::new()).into_iter())?;
 
         self.tables_per_level.as_mut().unwrap()[0] += 1;
         if self.num_levels.unwrap() == 0 {
             self.num_levels = Some(1);
         }
-        // TODO: this should syncdata
-        fs::write(self.path.join("header"), self.tables_per_level.unwrap())?;
+        self.commit_header()?;
         self.memtable.skipmap = SkipMap::new();
+        
         if self.tables_per_level.unwrap()[0] == TABLES_UNTIL_COMPACTION {
             self.compact()?;
         }
+        
+        Ok(())
+    }
+    fn commit_header(&mut self) -> io::Result<()> {
+        let mut header = File::create(self.path.join("header"))?;
+        header.write_all(&self.tables_per_level.unwrap())?;
+        header.sync_all()?;
         Ok(())
     }
     
-    fn compact_level(&mut self, level: usize) -> Result<(), io::Error> {
+    fn compact_level(&mut self, level: usize) -> io::Result<()> {
         assert!(level != 4);
         let new_table = self.tables_per_level.unwrap()[level + 1];
         println!("{}", new_table);
@@ -787,21 +791,21 @@ impl Tree {
         // for compaction, there is a new failure point: between writing the table and deleting the old level
         // if this fails, on init, the database will recompact the old files and duplicate the data
         // this does not impact correctness (latest table would be read first), but space performance and write performance (compaction happens sooner)
-        self.tables_per_level.unwrap()[level] = 0;
+        self.tables_per_level.as_mut().unwrap()[level] = 0;
         if self.tables_per_level.unwrap()[level + 1] == 0 {
             self.num_levels = Some(self.num_levels.unwrap() + 1);
-        } 
-        self.tables_per_level.unwrap()[level + 1] += 1;
+        }
+        // TODO: unwrapping makes a copy if you do not do as_mut
+        // investigate if there are any other bugs causes by me not doing this
+        // is there a good way to avoid this?
+        self.tables_per_level.as_mut().unwrap()[level + 1] += 1;
         fs::remove_dir_all(self.path.join(level.to_string()))?;
-        let paths = fs::read_dir(self.path.as_path()).unwrap();
-
-        for path in paths {
-            println!("path {}", path.unwrap().path().display());
-        }        
-        fs::write(self.path.join("header"), self.tables_per_level.unwrap())?;
+       
+        self.commit_header()?;
+        
         Ok(())
     }
-    fn compact(&mut self) -> Result<(), io::Error> {
+    fn compact(&mut self) -> io::Result<()> {
         let mut level = 0;
         // this may fail between compactions, so we need to check if we need to compact on startup
         while self.tables_per_level.unwrap()[level] == TABLES_UNTIL_COMPACTION {
@@ -811,14 +815,14 @@ impl Tree {
         Ok(())
     }
 
-    fn append_to_wal(&mut self, entry: WALEntry) -> Result<(), io::Error> {
+    fn append_to_wal(&mut self, entry: WALEntry) -> io::Result<()> {
         entry.serialize(&mut (self.wal_file.as_mut().unwrap()))?;
         // wal metadata should not change, so sync_data is fine to use, instead of sync_all/fsync
         self.wal_file.as_mut().unwrap().sync_data()?;
         Ok(())
     }
 
-    fn restore_wal(&mut self) -> Result<(), io::Error> {
+    fn restore_wal(&mut self) -> io::Result<()> {
         let mut entries = Vec::new();
         assert!(self.path.join("wal").exists());
         loop {
@@ -928,10 +932,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         for i in 1..repeats {
             // println!("{}", i);
             let key = i.to_string();
-            let value = 0.to_string();
-            tree.get(&(key.as_bytes().to_vec()))?;
-            tree.put(&(key.as_bytes().to_vec()), &(value.as_bytes().to_vec()))?;
+            let value = i.to_string() + &x.to_string();
+            let prev_value = i.to_string() + &(x - 1).to_string();
+            let res = tree.get(&(key.as_bytes().to_vec()))?;
+            if res.is_some() {
+                let res = res.unwrap();
+                assert!(res == (prev_value.as_bytes().to_vec()));
+            }
             tree.delete(&(key.as_bytes().to_vec()))?;
+            tree.put(&(key.as_bytes().to_vec()), &(value.as_bytes().to_vec()))?;
         }
         let mut tree = Tree::new("./yadb");
         tree.init()?;
