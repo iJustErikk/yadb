@@ -2,12 +2,15 @@ use std::cell::RefCell;
 // lsm based storage engine
 // level compaction whenever level hits 10 sstables
 use std::fs;
+use std::hash::BuildHasher;
+use std::hash::Hasher;
 use std::io::Cursor;
 use std::io::Seek;
 use std::io::SeekFrom;
 use std::iter::Peekable;
 use std::mem;
 use cuckoofilter::CuckooFilter;
+use cuckoofilter::ExportedCuckooFilter;
 use fs::File;
 use std::fs::OpenOptions;
 
@@ -29,7 +32,7 @@ extern crate crossbeam_skiplist;
 use crossbeam_skiplist::SkipMap;
 extern crate tempfile;
 extern crate cuckoofilter;
-extern crate zwohash;
+extern crate fastmurmur3;
 
 
 // on tuning bloom filters:
@@ -252,6 +255,39 @@ struct Table {
     current_block: Option<DataBlock>,
     current_block_idx: usize
 }
+
+pub struct FastMurmur3;
+
+pub struct FastMurmur3Hasher {
+    data: Vec<u8>,
+}
+
+impl Hasher for FastMurmur3Hasher {
+    fn finish(&self) -> u64 {
+        let big_hash: u128 = fastmurmur3::hash(&self.data);
+        (big_hash & ((1u128 << 64) - 1)) as u64
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.data.extend_from_slice(bytes);
+    }
+}
+
+impl Default for FastMurmur3Hasher {
+    fn default() -> Self {
+        Self {
+            data: Vec::new(),
+        }
+    }
+}
+
+impl BuildHasher for FastMurmur3 {
+    type Hasher = FastMurmur3Hasher;
+
+    fn build_hasher(&self) -> Self::Hasher {
+        FastMurmur3Hasher::default()
+    }
+}
 impl Table {
     fn new(path: PathBuf, reading: bool) -> io::Result<Self> {
         if !reading && !path.parent().unwrap().exists() {
@@ -281,22 +317,26 @@ impl Table {
         self.file.seek(SeekFrom::End(-24))?;
         let datablock_size = self.file.read_u64::<LittleEndian>()?;
         self.file.seek(SeekFrom::Start(datablock_size))?;
-        Ok(Index::deserialize(&self.file)?);
+        Ok(Index::deserialize(&self.file)?)
     }
-    fn get_filter(&mut self) -> CuckooFilter {
+    fn get_filter(&mut self) -> io::Result<CuckooFilter<FastMurmur3Hasher>> {
         self.file.seek(SeekFrom::End(-16))?;
         let filter_offset = self.file.read_u64::<LittleEndian>()?;
         self.file.seek(SeekFrom::Start(filter_offset))?;
         let filter_size = self.file.read_u64::<LittleEndian>()?;
-        let mut filter_bytes = vec![0; filter_size as usize];
-        return Ok(filter_from_bytes(filter_bytes)?);
+        let mut filter_bytes: Vec<u8> = vec![0; filter_size as usize];
+        self.file.read_exact(&mut filter_bytes)?;
+        let raw = ExportedCuckooFilter{values: filter_bytes, length: filter_size as usize};
+        // TODO: we are unwrapping this, really we should have a corrupted filter error
+        let cf = CuckooFilter::try_from(raw).unwrap();
+        Ok(cf)
     }
     fn get_datablock(&mut self, offset: u64) -> io::Result<DataBlock> {
         self.file.seek(SeekFrom::Start(offset))?;
         return Ok(DataBlock::deserialize(&mut self.file)?);
     }
     
-    fn write_table<I>(&mut self, it: I, num_estimated_keys: usize) -> io::Result<()>  where I: IntoIterator<Item=(Vec<u8>, Vec<u8>)>, {
+    fn write_table<I>(&mut self, it: I, num_unique_keys: usize) -> io::Result<()>  where I: IntoIterator<Item=(Vec<u8>, Vec<u8>)>, {
         // TODO: I could convert these to use the serialize function for DataBlock + Index
         // this would present overhead, as they would most likely be copied into the ds just to be written out
         // but it would keep the logic for serde in one impl
@@ -307,7 +347,7 @@ impl Table {
         // interesting read: https://www.eecs.harvard.edu/~michaelm/postscripts/tr-02-05.pdf
         // TODO: look into hash DOS attacks
 
-        let mut cf: CuckooFilter<std::collections::hash_map::DefaultHasher> = cuckoofilter::CuckooFilter::with_capacity(num_estimated_keys);
+        let mut cf: CuckooFilter<FastMurmur3Hasher> = CuckooFilter::with_capacity(num_unique_keys);
         let mut unique_keys: u64 = 0;
         for (key, value) in it {
             cf.add(&key).unwrap();
@@ -338,8 +378,9 @@ impl Table {
         self.file.write_all(&data_section)?;
         self.file.write_u64::<LittleEndian>(index.len() as u64)?;
         self.file.write_all(&index)?;
-        self.file.write_u64<LittleEndian>(filter_num_bytes);
-        self.file.write_all(filter_bytes);
+        let ex_filter = cf.export();
+        self.file.write_u64::<LittleEndian>(ex_filter.length as u64);
+        self.file.write_all(&ex_filter.values);
         // footer: 8 bytes for index offset, 8 for filter offset, 8 for unique keys
         let filter_offset = index.len() + data_section.len() + 8;
         self.file.write_u64::<LittleEndian>(data_section.len() as u64)?;
@@ -652,7 +693,6 @@ impl Tree {
             let mut file = File::open(self.path.clone().join("header"))?;
             // if this fails, alert the user with YAStorageError, corrupted header
             file.read_exact(&mut buffer)?;
-            println!("{}", buffer[1]);
             self.tables_per_level = Some(buffer);
             self.wal_file = Some(OpenOptions::new()
             .read(true)
@@ -820,11 +860,11 @@ impl Tree {
         let new_table_path = self.path.join((level + 1).to_string()).join(new_table.to_string());
         println!("{}, ", new_table_path.to_str().unwrap());
         let mut table = Table::new(new_table_path, false)?;
-        let tables = (0..TABLES_UNTIL_COMPACTION).map(|x| Table::new(self.path.join(level.to_string()).join(x.to_string()), true)).collect::<io::Result<Vec<Table>>>()?;
+        let mut tables = (0..TABLES_UNTIL_COMPACTION).map(|x| Table::new(self.path.join(level.to_string()).join(x.to_string()), true)).collect::<io::Result<Vec<Table>>>()?;
         // will at worst be a k tables * num keys overestimate
         // unique keys recalculated each compaction, so this will remain the case
-        let num_keys_estimation = tables.iter().map(|x| x.get_num_unique_keys()).collect::<io::Result<Vec<u64>>>()?.into_iter().reduce(|acc, x| acc + x).unwrap();
-        table.write_table(MergedTableIterators::new(tables)?, num_keys_estimation)?;
+        let num_keys_estimation = tables.iter_mut().map(|x| x.get_num_unique_keys()).collect::<io::Result<Vec<u64>>>()?.into_iter().reduce(|acc, x| acc + x).unwrap();
+        table.write_table(MergedTableIterators::new(tables)? , num_keys_estimation as usize)?;
         // TODO: the commit tables scheme only works for writing single sstables
         // for compaction, there is a new failure point: between writing the table and deleting the old level
         // if this fails, on init, the database will recompact the old files and duplicate the data
