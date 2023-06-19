@@ -34,17 +34,6 @@ extern crate tempfile;
 extern crate cuckoofilter;
 extern crate fastmurmur3;
 
-
-// on tuning bloom filters:
-// given a target false positive probability, we can calculate how many hash functions/bits per key we need
-// cockroach's pebble uses 10, and they say that yields a 1% false positive rate
-// that sounds like a reasonable default. we can add an extra section into the sstable for table statistics
-// have a statistic for number of (unique) keys
-// that way, the bloom filter overestimation is no more than double the number of actual unique keys
-// ^^ this can be the size of the skipmap or easily be calculated during compaction
-// i also would like to avoid rehashing during compaction
-
-
 // metrics:
 // - wal replays
 // - wal replay total bytes
@@ -56,15 +45,11 @@ extern crate fastmurmur3;
 // - write ios / write operation
 // - number of corrupt rows
 
-// look into: no copy network -> fs, I believe kafka or some other "big" tool does this
-// look into: checksums for integrity
-// look into: retry mechanism for failed fs calls
-// look into: caching frequently read blocks (not keys, just avoid the block read io)
+// look into: no copy network -> fs, I believe kafka
+// look into: crcs for data integrity guarantee
+// look into: caching frequently read blocks, filters and indices
 // TODO: go through with checklist to make sure the database can fail at any point during wal replay, compaction or memtable flush
 // TODO: sometime later, create tests that mock fs state, test failures
-// TODO: handle unwraps correctly
-
-// assumption: user does not create any files in the database
 
 // assumption: user only runs one instance for a given folder
 // I'd imagine things would get corrupted quickly
@@ -340,6 +325,12 @@ impl Table {
         // TODO: I could convert these to use the serialize function for DataBlock + Index
         // this would present overhead, as they would most likely be copied into the ds just to be written out
         // but it would keep the logic for serde in one impl
+        // TODO: we can avoid writing the tombstone if a the key is not in any older block
+        // we can surely do this when compacting the current top level
+        // however, how can we do this if its not the current top level?
+        // could use bloom filter...however the ~97% chance tp tn exponentially decreases
+        // even by 20 tables, this is still better than guessing ~54%
+        // so if we cache the bloom filters on startup, this is an option.
         let mut index: Vec<u8> = Vec::new();
         let mut data_section: Vec<u8> = Vec::new();
         let mut current_block: Vec<u8> = Vec::new();
