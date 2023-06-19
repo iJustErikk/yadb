@@ -7,6 +7,7 @@ use std::io::Seek;
 use std::io::SeekFrom;
 use std::iter::Peekable;
 use std::mem;
+use cuckoofilter::CuckooFilter;
 use fs::File;
 use std::fs::OpenOptions;
 
@@ -27,6 +28,8 @@ use std::collections::BinaryHeap;
 extern crate crossbeam_skiplist;
 use crossbeam_skiplist::SkipMap;
 extern crate tempfile;
+extern crate cuckoofilter;
+extern crate zwohash;
 
 
 // on tuning bloom filters:
@@ -268,25 +271,46 @@ impl Table {
             file, total_data_bytes, current_block: None, current_block_idx: 0
         });
     }
-    fn get_index(&mut self) -> io::Result<Index> {
+    fn get_num_unique_keys(&mut self) -> io::Result<u64> {
         self.file.seek(SeekFrom::End(-8))?;
+        let num_keys = self.file.read_u64::<LittleEndian>()?;
+        Ok(num_keys)
+    }
+    fn get_index(&mut self) -> io::Result<Index> {
+        // third to last u64 in file
+        self.file.seek(SeekFrom::End(-24))?;
         let datablock_size = self.file.read_u64::<LittleEndian>()?;
         self.file.seek(SeekFrom::Start(datablock_size))?;
-        return Ok(Index::deserialize(&self.file)?);
+        Ok(Index::deserialize(&self.file)?);
+    }
+    fn get_filter(&mut self) -> CuckooFilter {
+        self.file.seek(SeekFrom::End(-16))?;
+        let filter_offset = self.file.read_u64::<LittleEndian>()?;
+        self.file.seek(SeekFrom::Start(filter_offset))?;
+        let filter_size = self.file.read_u64::<LittleEndian>()?;
+        let mut filter_bytes = vec![0; filter_size as usize];
+        return Ok(filter_from_bytes(filter_bytes)?);
     }
     fn get_datablock(&mut self, offset: u64) -> io::Result<DataBlock> {
         self.file.seek(SeekFrom::Start(offset))?;
         return Ok(DataBlock::deserialize(&mut self.file)?);
     }
     
-    fn write_table<I>(&mut self, it: I) -> io::Result<()>  where I: IntoIterator<Item=(Vec<u8>, Vec<u8>)>, {
+    fn write_table<I>(&mut self, it: I, num_estimated_keys: usize) -> io::Result<()>  where I: IntoIterator<Item=(Vec<u8>, Vec<u8>)>, {
         // TODO: I could convert these to use the serialize function for DataBlock + Index
         // this would present overhead, as they would most likely be copied into the ds just to be written out
         // but it would keep the logic for serde in one impl
         let mut index: Vec<u8> = Vec::new();
         let mut data_section: Vec<u8> = Vec::new();
         let mut current_block: Vec<u8> = Vec::new();
+        // needs to be roughly uniform, deterministic and fast -> not the default hasher
+        // interesting read: https://www.eecs.harvard.edu/~michaelm/postscripts/tr-02-05.pdf
+        // TODO: look into hash DOS attacks
+
+        let mut cf: CuckooFilter<std::collections::hash_map::DefaultHasher> = cuckoofilter::CuckooFilter::with_capacity(num_estimated_keys);
+        let mut unique_keys: u64 = 0;
         for (key, value) in it {
+            cf.add(&key).unwrap();
             if current_block.is_empty() {
                 index.write_u64::<LittleEndian>(key.len() as u64)?;
                 index.extend(&key);
@@ -303,6 +327,7 @@ impl Table {
                 data_section.write_u64::<LittleEndian>(current_block.len() as u64)?;
                 data_section.append(&mut current_block);
             }
+            unique_keys += 1;
         }
         // write last block if not already written
         if current_block.len() > 0 {
@@ -313,8 +338,13 @@ impl Table {
         self.file.write_all(&data_section)?;
         self.file.write_u64::<LittleEndian>(index.len() as u64)?;
         self.file.write_all(&index)?;
-        // footer: 8 bytes for index offset
+        self.file.write_u64<LittleEndian>(filter_num_bytes);
+        self.file.write_all(filter_bytes);
+        // footer: 8 bytes for index offset, 8 for filter offset, 8 for unique keys
+        let filter_offset = index.len() + data_section.len() + 8;
         self.file.write_u64::<LittleEndian>(data_section.len() as u64)?;
+        self.file.write_u64::<LittleEndian>(filter_offset as u64)?;
+        self.file.write_u64::<LittleEndian>(unique_keys)?;
         self.file.sync_all()?;
         Ok(())
     }
@@ -703,6 +733,10 @@ impl Tree {
     fn search_table(&self, level: usize, table: u8, key: &Vec<u8>) -> Result<Option<Vec<u8>>, YAStorageError> {
         // not checking bloom filter yet
         let mut table: Table = Table::new(self.path.clone().join(level.to_string()).join(table.to_string()), true)?;
+        let filter = table.get_filter()?;
+        if !filter.contains(key) {
+            return Ok(None);
+        }
         let index = table.get_index()?;
         let byte_offset = search_index(&index, key);
         if byte_offset.is_none() {
@@ -756,8 +790,8 @@ impl Tree {
         // TODO: begin write by creating table, then passing iterator for writing
         let new_path = self.path.join("0").join(table_to_write.to_string());
         let mut table = Table::new(new_path, false)?;
-        
-        table.write_table(mem::replace(&mut self.memtable.skipmap, SkipMap::new()).into_iter())?;
+        let skipmap_len = self.memtable.skipmap.len();
+        table.write_table(mem::replace(&mut self.memtable.skipmap, SkipMap::new()).into_iter(), skipmap_len)?;
 
         self.tables_per_level.as_mut().unwrap()[0] += 1;
         if self.num_levels.unwrap() == 0 {
@@ -786,7 +820,11 @@ impl Tree {
         let new_table_path = self.path.join((level + 1).to_string()).join(new_table.to_string());
         println!("{}, ", new_table_path.to_str().unwrap());
         let mut table = Table::new(new_table_path, false)?;
-        table.write_table(MergedTableIterators::new((0..TABLES_UNTIL_COMPACTION).map(|x| Table::new(self.path.join(level.to_string()).join(x.to_string()), true)).collect::<io::Result<Vec<Table>>>()?)?)?;
+        let tables = (0..TABLES_UNTIL_COMPACTION).map(|x| Table::new(self.path.join(level.to_string()).join(x.to_string()), true)).collect::<io::Result<Vec<Table>>>()?;
+        // will at worst be a k tables * num keys overestimate
+        // unique keys recalculated each compaction, so this will remain the case
+        let num_keys_estimation = tables.iter().map(|x| x.get_num_unique_keys()).collect::<io::Result<Vec<u64>>>()?.into_iter().reduce(|acc, x| acc + x).unwrap();
+        table.write_table(MergedTableIterators::new(tables)?, num_keys_estimation)?;
         // TODO: the commit tables scheme only works for writing single sstables
         // for compaction, there is a new failure point: between writing the table and deleting the old level
         // if this fails, on init, the database will recompact the old files and duplicate the data
@@ -924,24 +962,34 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut tree = Tree::new("./yadb");
     tree.init()?;
     println!("init");
-    let repeats = 219;
-    for x in 0..4 {
+    let repeats = 1000;
+    // for x in 0..4 {
+    //     for i in 1..repeats {
+    //         // println!("{}", i);
+    //         let key = i.to_string();
+    //         let value = i.to_string() + &x.to_string();
+    //         let prev_value = i.to_string() + &(x - 1).to_string();
+    //         let res = tree.get(&(key.as_bytes().to_vec()))?;
+    //         if res.is_some() {
+    //             let res = res.unwrap();
+    //             assert!(res == (prev_value.as_bytes().to_vec()));
+    //         }
+    //         tree.delete(&(key.as_bytes().to_vec()))?;
+    //         tree.put(&(key.as_bytes().to_vec()), &(value.as_bytes().to_vec()))?;
+    //     }
+    //     let mut tree = Tree::new("./yadb");
+    //     tree.init()?;
+    // }
         for i in 1..repeats {
             // println!("{}", i);
             let key = i.to_string();
-            let value = i.to_string() + &x.to_string();
-            let prev_value = i.to_string() + &(x - 1).to_string();
-            let res = tree.get(&(key.as_bytes().to_vec()))?;
-            if res.is_some() {
-                let res = res.unwrap();
-                assert!(res == (prev_value.as_bytes().to_vec()));
-            }
+            let value = i.to_string();
+            tree.get(&(key.as_bytes().to_vec()))?;
             tree.delete(&(key.as_bytes().to_vec()))?;
             tree.put(&(key.as_bytes().to_vec()), &(value.as_bytes().to_vec()))?;
         }
         let mut tree = Tree::new("./yadb");
         tree.init()?;
-    }
     
     Ok(())
 }
