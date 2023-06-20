@@ -1,7 +1,9 @@
-Right now, a benchmark that reads/writes/updates 219 short k/v runs at 150 ops/second.
+Right now, a benchmark that reads/writes/updates 219 short k/v  twice runs at 150 ops/second.
 ^^ this is on codespaces. I believe running this on a cloud environment reduces the precise accuracy of performance. However, 150 ops/second is fairly consistent.
 
 I'd like to improve this to at least 1000 ops/second. Maybe higher. This needs to be able to be used to operate database workloads.
+
+Update: Running a few massive keys is fast...this suggests that we can use batch/linger for writes. This increases latency but should massively increase throughput.
 
 After running a flamegraph profile, I notice the following:
 - runtime is dominated by write calls (particularly file sync). 85% of runtime is write calls.

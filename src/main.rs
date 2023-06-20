@@ -11,13 +11,14 @@ use std::io::{Error as IoError, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 
-struct Storage {
+
+struct LSMTree {
     tree: Tree,
 }
 
-impl Storage {
+impl LSMTree {
     fn new(tree: Tree) -> Self {
-        Storage { tree }
+        LSMTree { tree }
     }
 
     fn put(&self, key: &[u8], value: &[u8]) -> sled::Result<()> {
@@ -35,7 +36,7 @@ impl Storage {
     }
 }
 
-fn handle_client(mut stream: TcpStream, storage: &Storage) {
+fn handle_client(mut stream: TcpStream, storage: &LSMTree) {
     loop {
         match read_client_command(&mut stream) {
             Ok(command) => {
@@ -65,7 +66,7 @@ fn read_client_command(stream: &mut TcpStream) -> Result<Vec<String>, IoError> {
     Ok(command)
 }
 
-fn process_command(command: &[String], storage: &Storage) -> String {
+fn process_command(command: &[String], storage: &LSMTree) -> String {
     match command.get(0).map(String::as_str) {
         Some("put") if command.len() == 3 => {
             let key = command[1].as_bytes();
@@ -111,7 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let db = sled::open("yadb").unwrap();
     let tree = db.open_tree("default").unwrap();
-    let storage = Storage::new(tree);
+    let storage = LSMTree::new(tree);
 
     let listener = TcpListener::bind("127.0.0.1:8000").unwrap();
     info!("server up");

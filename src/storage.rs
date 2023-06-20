@@ -9,9 +9,11 @@ use std::io::Seek;
 use std::io::SeekFrom;
 use std::iter::Peekable;
 use std::mem;
-use cuckoofilter::CuckooFilter;
-use cuckoofilter::ExportedCuckooFilter;
-use fs::File;
+use self::tempfile::tempdir;
+
+use self::cuckoofilter::CuckooFilter;
+use self::cuckoofilter::ExportedCuckooFilter;
+use self::fs::File;
 use std::fs::OpenOptions;
 
 use std::path::PathBuf;
@@ -21,7 +23,7 @@ use std::io::Write;
 use std::io::Read;
 use std::fmt;
 extern crate byteorder;
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use self::byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{self};
 use std::convert::TryFrom;
 
@@ -29,7 +31,7 @@ use std::collections::BinaryHeap;
 
 
 extern crate crossbeam_skiplist;
-use crossbeam_skiplist::SkipMap;
+use self::crossbeam_skiplist::SkipMap;
 extern crate tempfile;
 extern crate cuckoofilter;
 extern crate fastmurmur3;
@@ -82,7 +84,8 @@ const TABLES_UNTIL_COMPACTION: u8 = 3;
 const BLOCK_SIZE: usize = 4_000;
 const MAX_MEMTABLE_SIZE: usize = 1_000_000;
 #[derive(Debug)]
-enum YAStorageError {
+pub enum YAStorageError {
+    // TODO: should just panic if there is an ioerror, as it cannot help the user
     IOError {error: io::Error},
     MissingHeader,
     CorruptedHeader,
@@ -123,7 +126,7 @@ impl fmt::Display for YAStorageError {
 
 impl Error for YAStorageError {}
 
-struct Tree {
+pub struct Tree {
     // let's start with 5 levels
     // this is a lot of space 111110 mb ~ 108.5 gb
     num_levels: Option<usize>,
@@ -256,9 +259,9 @@ struct Table {
     current_block_idx: usize
 }
 
-pub struct FastMurmur3;
+struct FastMurmur3;
 
-pub struct FastMurmur3Hasher {
+struct FastMurmur3Hasher {
     data: Vec<u8>,
 }
 
@@ -517,7 +520,7 @@ impl Index {
     }
     return res;
 }
-    pub fn serialize(&self, mut writer: &File) -> io::Result<()> {
+    fn serialize(&self, mut writer: &File) -> io::Result<()> {
         writer.write_u64::<LittleEndian>(self.get_num_bytes())?;
         for (k, offset) in self.entries.iter() {
             writer.write_u64::<LittleEndian>(k.len() as u64)?;
@@ -526,7 +529,7 @@ impl Index {
         }
         Ok(())
     }
-    pub fn deserialize(mut reader: &File) -> io::Result<Index> {
+    fn deserialize(mut reader: &File) -> io::Result<Index> {
         let mut entries = Vec::new();
         // TODO: is it the caller's responsibility to put the file pointer in the right place or is it this function's
         // I really should be wrapping these functions with functions in Table- one place to verify on disk structure implementation
@@ -559,7 +562,7 @@ impl DataBlock {
     fn new() -> Self {
         return DataBlock {entries: Vec::new()};
     }
-    pub fn get_num_bytes(&self) -> u64 {
+    fn get_num_bytes(&self) -> u64 {
         let mut res = 0;
         for (k, v) in self.entries.iter() {
             res += k.len() as u64;
@@ -568,7 +571,7 @@ impl DataBlock {
         }
         return res;
     }
-    pub fn serialize(&self, writer: &mut File) -> io::Result<()> {
+    fn serialize(&self, writer: &mut File) -> io::Result<()> {
         writer.write_u64::<LittleEndian>(self.get_num_bytes())?;
         for (k, v) in self.entries.iter() {
             writer.write_u64::<LittleEndian>(k.len() as u64)?;
@@ -578,7 +581,7 @@ impl DataBlock {
         }
         Ok(())
     }
-    pub fn deserialize(reader: &mut File) -> io::Result<Self> {
+    fn deserialize(reader: &mut File) -> io::Result<Self> {
         let block_size = reader.read_u64::<LittleEndian>()?;
         let mut block = vec![0; block_size as usize];
         reader.read_exact(&mut block)?;
@@ -602,7 +605,7 @@ impl DataBlock {
 }
 
 impl WALEntry {
-    pub fn serialize<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn serialize<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         writer.write_u8(self.operation as u8)?;
         writer.write_u64::<LittleEndian>(self.key.len() as u64)?;
         writer.write_all(&self.key)?;
@@ -616,7 +619,7 @@ impl WALEntry {
     // for either, let's make the assumption that it happened on the last walentry
     // read to the end of the file
     // comeback and think of a better solution
-    pub fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
+    fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
         let operation = reader.read_u8()?;
         let operation = Operation::try_from(operation).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid operation"))?;
         let key_len = reader.read_u64::<LittleEndian>()? as usize;
@@ -656,6 +659,7 @@ impl Tree {
     }
     pub fn init(&mut self) -> Result<(), YAStorageError> {
         self.init_folder()?;
+        println!("this happens");
 
 
         self.general_sanity_check()?;
@@ -704,7 +708,6 @@ impl Tree {
     }
 
     fn general_sanity_check(&mut self) -> Result<(), YAStorageError> {
-
         // any folder should be 0 - 4
         // any file in those folders should be numeric
         // # of sstables should match header
@@ -924,6 +927,7 @@ impl Tree {
         let skipmap = SkipMap::new();
 
         for entry in entries {
+            println!("{}", String::from_utf8_lossy(&entry.key));
             match entry.operation {
                 Operation::PUT => { skipmap.insert(entry.key, entry.value); }
                 // empty vector is tombstone
@@ -999,38 +1003,26 @@ impl Tree {
 
 // testing only
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut tree = Tree::new("./yadb");
-    tree.init()?;
-    println!("init");
-    let repeats = 1000;
-    // for x in 0..4 {
-    //     for i in 1..repeats {
-    //         // println!("{}", i);
-    //         let key = i.to_string();
-    //         let value = i.to_string() + &x.to_string();
-    //         let prev_value = i.to_string() + &(x - 1).to_string();
-    //         let res = tree.get(&(key.as_bytes().to_vec()))?;
-    //         if res.is_some() {
-    //             let res = res.unwrap();
-    //             assert!(res == (prev_value.as_bytes().to_vec()));
-    //         }
-    //         tree.delete(&(key.as_bytes().to_vec()))?;
-    //         tree.put(&(key.as_bytes().to_vec()), &(value.as_bytes().to_vec()))?;
-    //     }
-    //     let mut tree = Tree::new("./yadb");
-    //     tree.init()?;
-    // }
-        for i in 1..repeats {
-            // println!("{}", i);
-            let key = i.to_string();
-            let value = i.to_string();
-            tree.get(&(key.as_bytes().to_vec()))?;
-            tree.delete(&(key.as_bytes().to_vec()))?;
-            tree.put(&(key.as_bytes().to_vec()), &(value.as_bytes().to_vec()))?;
-        }
-        let mut tree = Tree::new("./yadb");
-        tree.init()?;
-    
+    let dir = tempdir()?;
+    let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+    tree.init().expect("Failed to init folder");
+    for i in 0..3 {
+        let key = i.to_string();
+        let value: Vec<u64> = vec![i; 1000];
+        tree.get(&(key.as_bytes().to_vec()))?;
+        tree.delete(&(key.as_bytes().to_vec()))?;
+        tree.put(&(key.as_bytes().to_vec()), &(value.iter().flat_map(|&x| x.to_le_bytes().to_vec()).collect()))?;
+    }
+    let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+    tree.init().expect("Failed to init folder");
+    for i in 0..3 {
+        let key = i.to_string();
+        let value: Vec<u64> = vec![i; 1000];
+        let value_bytes: Vec<u8> = value.iter().flat_map(|&x| x.to_le_bytes().to_vec()).collect();
+        assert!(tree.get(&(key.as_bytes().to_vec())).unwrap().unwrap() == value_bytes);
+        tree.delete(&(key.as_bytes().to_vec()))?;
+        tree.put(&(key.as_bytes().to_vec()), &value_bytes)?;
+    }
     Ok(())
 }
 // unit tests
@@ -1041,8 +1033,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod init_tests {
     use std::fs::{create_dir, remove_dir};
-    use fs::remove_file;
-    use tempfile::tempdir;
+    use self::fs::remove_file;
+    use self::tempfile::tempdir;
 
     use super::*;
     // TODO: these check for the existence of some error
