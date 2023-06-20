@@ -8,19 +8,18 @@ use yadb::storage::Tree;
 
 #[test]
 fn interesting_case() -> Result<(), Box<dyn Error>> {
-    // interesting case I found while exploring testing memtable flush (writing 333k bytes instead of 1k)
     let dir = tempdir()?;
     let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
     tree.init().expect("Failed to init folder");
     for i in 0..3 {
         let key = i.to_string();
-        let value: Vec<u64> = vec![i; 62500];
+        let value: Vec<u8> = vec![i; 500_000];
         println!("get");
         tree.get(&(key.as_bytes().to_vec()))?;
         println!("delete");
         tree.delete(&(key.as_bytes().to_vec()))?;
         println!("put");
-        tree.put(&(key.as_bytes().to_vec()), &(value.iter().flat_map(|&x| x.to_le_bytes().to_vec()).collect()))?;
+        tree.put(&(key.as_bytes().to_vec()), &value)?;
     }
     Ok(())
 }

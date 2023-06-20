@@ -299,7 +299,7 @@ impl Table {
         let mut file = if reading { File::open(&path)? } else { File::create(&path)?};
         let total_data_bytes = None;
         if reading {
-            file.seek(SeekFrom::End(-8))?;
+            file.seek(SeekFrom::End(-24))?;
             let total_data_bytes = Some(file.read_u64::<LittleEndian>()?);
             file.seek(SeekFrom::Start(0))?;
             return Ok(Table {
@@ -313,6 +313,7 @@ impl Table {
     fn get_num_unique_keys(&mut self) -> io::Result<u64> {
         self.file.seek(SeekFrom::End(-8))?;
         let num_keys = self.file.read_u64::<LittleEndian>()?;
+        self.file.seek(SeekFrom::Start(0))?;
         Ok(num_keys)
     }
     fn get_index(&mut self) -> io::Result<Index> {
@@ -320,7 +321,9 @@ impl Table {
         self.file.seek(SeekFrom::End(-24))?;
         let datablock_size = self.file.read_u64::<LittleEndian>()?;
         self.file.seek(SeekFrom::Start(datablock_size))?;
-        Ok(Index::deserialize(&self.file)?)
+        let index = Index::deserialize(&self.file)?;
+        self.file.seek(SeekFrom::Start(0))?;
+        Ok(index)
     }
     fn get_filter(&mut self) -> io::Result<CuckooFilter<FastMurmur3Hasher>> {
         self.file.seek(SeekFrom::End(-16))?;
@@ -332,11 +335,14 @@ impl Table {
         let raw = ExportedCuckooFilter{values: filter_bytes, length: filter_size as usize};
         // TODO: we are unwrapping this, really we should have a corrupted filter error
         let cf = CuckooFilter::try_from(raw).unwrap();
+        self.file.seek(SeekFrom::Start(0))?;
         Ok(cf)
     }
     fn get_datablock(&mut self, offset: u64) -> io::Result<DataBlock> {
         self.file.seek(SeekFrom::Start(offset))?;
-        return Ok(DataBlock::deserialize(&mut self.file)?);
+        let db = DataBlock::deserialize(&mut self.file)?;
+        self.file.seek(SeekFrom::Start(0))?;
+        return Ok(db);
     }
     
     fn write_table<I>(&mut self, it: I, num_unique_keys: usize) -> io::Result<()>  where I: IntoIterator<Item=(Vec<u8>, Vec<u8>)>, {
@@ -404,6 +410,7 @@ impl Iterator for Table {
                 // we've reached the end of the datablocks
                 return None;
             }
+            println!("testing {} {}", self.total_data_bytes.unwrap(), self.file.stream_position().unwrap());
             let current_block = DataBlock::deserialize(&mut self.file);
             if current_block.is_err() {
                 return Some(Err(current_block.err().unwrap()));
@@ -582,8 +589,12 @@ impl DataBlock {
         Ok(())
     }
     fn deserialize(reader: &mut File) -> io::Result<Self> {
+        println!("try to get db");
+        println!("{} {}", reader.metadata()?.len(), reader.stream_position().unwrap());
         let block_size = reader.read_u64::<LittleEndian>()?;
+        println!("{} bs", block_size);
         let mut block = vec![0; block_size as usize];
+        println!("we make this");
         reader.read_exact(&mut block)?;
         let block_len = block.len();
         let mut cursor = Cursor::new(block);
@@ -599,6 +610,7 @@ impl DataBlock {
             cursor.read_exact(&mut value)?;
             entries.push((key, value));
         }
+        println!("got db");
 
         Ok(DataBlock{entries: entries})
     }
@@ -820,7 +832,6 @@ impl Tree {
     }
     
     fn write_skipmap_as_sstable(&mut self) -> io::Result<()> {
-        let paths = fs::read_dir(self.path.as_path()).unwrap();
         let table_to_write = self.tables_per_level.unwrap()[0];
         if !self.path.join("0").exists() {
             fs::create_dir(self.path.join("0"))?;
@@ -842,10 +853,11 @@ impl Tree {
         }
         self.commit_header()?;
         self.memtable.skipmap = SkipMap::new();
-        
+
         if self.tables_per_level.unwrap()[0] == TABLES_UNTIL_COMPACTION {
             self.compact()?;
-        }
+        }        
+
         
         Ok(())
     }
@@ -859,14 +871,13 @@ impl Tree {
     fn compact_level(&mut self, level: usize) -> io::Result<()> {
         assert!(level != 4);
         let new_table = self.tables_per_level.unwrap()[level + 1];
-        println!("{}", new_table);
         let new_table_path = self.path.join((level + 1).to_string()).join(new_table.to_string());
-        println!("{}, ", new_table_path.to_str().unwrap());
         let mut table = Table::new(new_table_path, false)?;
         let mut tables = (0..TABLES_UNTIL_COMPACTION).map(|x| Table::new(self.path.join(level.to_string()).join(x.to_string()), true)).collect::<io::Result<Vec<Table>>>()?;
         // will at worst be a k tables * num keys overestimate
         // unique keys recalculated each compaction, so this will remain the case
         let num_keys_estimation = tables.iter_mut().map(|x| x.get_num_unique_keys()).collect::<io::Result<Vec<u64>>>()?.into_iter().reduce(|acc, x| acc + x).unwrap();
+
         table.write_table(MergedTableIterators::new(tables)? , num_keys_estimation as usize)?;
         // TODO: the commit tables scheme only works for writing single sstables
         // for compaction, there is a new failure point: between writing the table and deleting the old level
@@ -876,6 +887,7 @@ impl Tree {
         if self.tables_per_level.unwrap()[level + 1] == 0 {
             self.num_levels = Some(self.num_levels.unwrap() + 1);
         }
+
         // TODO: unwrapping makes a copy if you do not do as_mut
         // investigate if there are any other bugs causes by me not doing this
         // is there a good way to avoid this?
@@ -883,7 +895,7 @@ impl Tree {
         fs::remove_dir_all(self.path.join(level.to_string()))?;
        
         self.commit_header()?;
-        
+
         Ok(())
     }
     fn compact(&mut self) -> io::Result<()> {
@@ -966,6 +978,7 @@ impl Tree {
         self.append_to_wal(WALEntry { operation, key: key.to_vec(), value: value.to_vec() })?;
         // TODO: no magic values
         // add config setting
+
         if self.memtable.size > MAX_MEMTABLE_SIZE {
             self.write_skipmap_as_sstable()?;
             self.memtable.skipmap = SkipMap::new();
