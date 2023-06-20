@@ -1,5 +1,6 @@
-// integration tests for storage
-// recovery, compaction, g/p/d
+// tests for storage engine (kv, garbage collection, iterators)
+// recovery, compaction (p/d updates, spread throughot tables), flush for g/p/d, hit 1st, 2nd, last blocks.
+// test db recovery (how to inject failures?)
 extern crate tempfile;
 use self::tempfile::tempdir;
 use std::error::Error;
