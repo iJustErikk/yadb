@@ -13,3 +13,13 @@ Lofty goals for this project:
 - Build single node sql database
 - Build distributed sql database (with simple sql, maybe fuller sql syntax for non-distributed databases) like Cockroachdb
 - (possibly) build b epsilon storage engine
+
+## Running/testing/profiling LSM Based KV Storage Engine
+
+Run `./setup.sh` to get started.
+
+Run `cargo test` to run tests.
+
+Try 33/33/33 r/w/d 5000 x 2 (30000 operations) key benchmark with `./run_storage.sh`
+
+Profile that benchmark with `./profile_storage.sh`

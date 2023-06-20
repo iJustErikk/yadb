@@ -65,9 +65,10 @@ extern crate fastmurmur3;
 // the user is going to want specific, actionable errors
 
 // Magic vars (figure out how to make these configurable)
-const TABLES_UNTIL_COMPACTION: u8 = 3;
-const BLOCK_SIZE: usize = 4_000;
-const MAX_MEMTABLE_SIZE: usize = 1_000_000;
+// TODO: exposing these for integration test- should allow user to specify this in code
+pub const TABLES_UNTIL_COMPACTION: u8 = 3;
+pub const BLOCK_SIZE: usize = 4_000;
+pub const MAX_MEMTABLE_SIZE: usize = 1_000_000;
 #[derive(Debug)]
 pub enum YAStorageError {
     // TODO: should just panic if there is an ioerror, as it cannot help the user
@@ -379,8 +380,8 @@ impl Table {
         self.file.write_u64::<LittleEndian>(index.len() as u64)?;
         self.file.write_all(&index)?;
         let ex_filter = cf.export();
-        self.file.write_u64::<LittleEndian>(ex_filter.length as u64);
-        self.file.write_all(&ex_filter.values);
+        self.file.write_u64::<LittleEndian>(ex_filter.length as u64)?;
+        self.file.write_all(&ex_filter.values)?;
         // footer: 8 bytes for index offset, 8 for filter offset, 8 for unique keys
         let filter_offset = index.len() + data_section.len() + 8;
         self.file.write_u64::<LittleEndian>(data_section.len() as u64)?;
@@ -401,7 +402,6 @@ impl Iterator for Table {
                 // we've reached the end of the datablocks
                 return None;
             }
-            println!("testing {} {}", self.total_data_bytes.unwrap(), self.file.stream_position().unwrap());
             let current_block = DataBlock::deserialize(&mut self.file);
             if current_block.is_err() {
                 return Some(Err(current_block.err().unwrap()));
@@ -580,12 +580,8 @@ impl DataBlock {
         Ok(())
     }
     fn deserialize(reader: &mut File) -> io::Result<Self> {
-        println!("try to get db");
-        println!("{} {}", reader.metadata()?.len(), reader.stream_position().unwrap());
         let block_size = reader.read_u64::<LittleEndian>()?;
-        println!("{} bs", block_size);
         let mut block = vec![0; block_size as usize];
-        println!("we make this");
         reader.read_exact(&mut block)?;
         let block_len = block.len();
         let mut cursor = Cursor::new(block);
@@ -601,7 +597,6 @@ impl DataBlock {
             cursor.read_exact(&mut value)?;
             entries.push((key, value));
         }
-        println!("got db");
 
         Ok(DataBlock{entries: entries})
     }
@@ -662,8 +657,6 @@ impl Tree {
     }
     pub fn init(&mut self) -> Result<(), YAStorageError> {
         self.init_folder()?;
-        println!("this happens");
-
 
         self.general_sanity_check()?;
 
@@ -779,10 +772,11 @@ impl Tree {
     fn search_table(&self, level: usize, table: u8, key: &Vec<u8>) -> Result<Option<Vec<u8>>, YAStorageError> {
         // not checking bloom filter yet
         let mut table: Table = Table::new(self.path.clone().join(level.to_string()).join(table.to_string()), true)?;
-        let filter = table.get_filter()?;
-        if !filter.contains(key) {
-            return Ok(None);
-        }
+        // TODO: filter is giving false negatives -> serde with filter is wrong or there is nondeterminism
+        // let filter = table.get_filter()?;
+        // if !filter.contains(key) {
+        //     return Ok(None);
+        // }
         let index = table.get_index()?;
         let byte_offset = search_index(&index, key);
         if byte_offset.is_none() {
@@ -837,6 +831,7 @@ impl Tree {
         let mut table = Table::new(new_path, false)?;
         let skipmap_len = self.memtable.skipmap.len();
         table.write_table(mem::replace(&mut self.memtable.skipmap, SkipMap::new()).into_iter(), skipmap_len)?;
+        self.memtable.size = 0;
 
         self.tables_per_level.as_mut().unwrap()[0] += 1;
         if self.num_levels.unwrap() == 0 {
@@ -914,7 +909,6 @@ impl Tree {
                 Ok(entry) => entries.push(entry),
                 Err(e) => {
                     if e.kind() == io::ErrorKind::UnexpectedEof {
-                        println!("this happens");
                         break;
                     } else {
                         return Err(e);
@@ -930,7 +924,6 @@ impl Tree {
         let skipmap = SkipMap::new();
 
         for entry in entries {
-            println!("{}", String::from_utf8_lossy(&entry.key));
             match entry.operation {
                 Operation::PUT => { skipmap.insert(entry.key, entry.value); }
                 // empty vector is tombstone
@@ -1010,22 +1003,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
     tree.init().expect("Failed to init folder");
-    for i in 0..3 {
+    for i in 0..5000 {
         let key = i.to_string();
-        let value: Vec<u64> = vec![i; 1000];
+        let value: Vec<u8> = vec![1; 10];
         tree.get(&(key.as_bytes().to_vec()))?;
         tree.delete(&(key.as_bytes().to_vec()))?;
-        tree.put(&(key.as_bytes().to_vec()), &(value.iter().flat_map(|&x| x.to_le_bytes().to_vec()).collect()))?;
+        tree.put(&(key.as_bytes().to_vec()), &value)?;
     }
+    // this will restore_wal- all operations following are from disk
     let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
     tree.init().expect("Failed to init folder");
-    for i in 0..3 {
+    for i in 0..5000 {
         let key = i.to_string();
-        let value: Vec<u64> = vec![i; 1000];
-        let value_bytes: Vec<u8> = value.iter().flat_map(|&x| x.to_le_bytes().to_vec()).collect();
-        assert!(tree.get(&(key.as_bytes().to_vec())).unwrap().unwrap() == value_bytes);
+        let value: Vec<u8> = vec![1; 10];
+        tree.get(&(key.as_bytes().to_vec()))?;
         tree.delete(&(key.as_bytes().to_vec()))?;
-        tree.put(&(key.as_bytes().to_vec()), &value_bytes)?;
+        tree.put(&(key.as_bytes().to_vec()), &value)?;
     }
     Ok(())
 }
