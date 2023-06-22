@@ -114,3 +114,25 @@ fn gpd_compaction() -> Result<(), Box<dyn Error>> {
     }
     Ok(())
 }
+
+/* Things to test:
+
+empty k/v
+super long k/v
+
+test compaction
+
+out of space
+test recovery - difficult to test this (could make any IO fail, but how can I do this without mocking every IO)
+performance
+
+fuzz testing
+think of more
+
+future tests:
+concurrency
+merge operator
+custom comparator
+(different compaction strategies?)
+
+*/

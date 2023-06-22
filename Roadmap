@@ -1,15 +1,17 @@
 Implementing all of these is time consuming. Need to prioritize so I can implement distributed kv store (almost ready)/sql database (need db iterator, performance enhancements)
 TODO:
-- profile and see what is taking so long
-- utilize bloom filters on reads
+- profile and see what is taking so long (wal appends + fsync)
+- utilize bloom filters on reads (these seem to be nondeterministic, need to debug)
 - implement iterator (when do iterators become invalid? should I go about a similar scheme to rocksdb (where iterators block operations that invalidate them)? how would I implement that?)
-- write integration tests
 - create/find benchmarks
 - implement filter/index/block cache (need to undo mem::replace for datablocks)
 
+TODO LATER (NEEDS PRIORITIZATION):
+
+- verify db durability + implement FS level manifest WAL to handle non atomic FS operations (varies OS to OS, everything should be atomic if POSIX compliant)
 - make code structure follow rust file structure
 - asyncify code (use tokio)
-- eliminate needless copies
+- eliminate needless copies (is this done)
 - implement custom merge operator
 - extract magic variables to config (in cargo.toml)
 - extend errors so they are more actionable
@@ -19,7 +21,7 @@ TODO:
 - abstract away touching any files
 - implement multithreaded writes/reads
 - rate limit compaction (static, additive/multiplicative increase, multiplicative decrease)
-- support tables? (see whether pebble does this)
+- support tables
 - compression
 - checksums
 - more stuff for dbs (merkle tree differences, transactions, configuring WAL log so it can hook up to replication logs like Raft)

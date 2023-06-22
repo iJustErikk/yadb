@@ -1,3 +1,4 @@
 Update: Running 5000 kv benchmark with more keys/values has the performance at 1829 ops/second (with wal flush). The previous benchmark was too small (219 keys).
+Update: Running locally takes much longer. Why? WAL appends/fsync is unreasonably slow.
 
 TODO: Look at profile again

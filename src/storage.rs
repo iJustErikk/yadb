@@ -36,18 +36,24 @@ extern crate tempfile;
 extern crate cuckoofilter;
 extern crate fastmurmur3;
 
-// metrics:
+// metrics to implement:
 // - wal replays
 // - wal replay total bytes
 // - # sstables
 // - disk usage
-// - avg sstable size
+// - avg/median sstable size
 // - overhead (lsm size) / (number of all bytes of keys, values, not including lengths)
 // - read ios / read operation
 // - write ios / write operation
-// - number of corrupt rows
+// - corruption
+// - filter false positive rate
+// - cache hit rate
+// - table iterations (iterators)
+// - lock contention times
+// - io time
+// - compression time
 
-// look into: no copy network -> fs, I believe kafka
+// look into: no copy network -> fs, I believe kafka does something like this
 // look into: crcs for data integrity guarantee
 // look into: caching frequently read blocks, filters and indices
 // TODO: go through with checklist to make sure the database can fail at any point during wal replay, compaction or memtable flush
@@ -60,15 +66,15 @@ extern crate fastmurmur3;
 // assumption: in the future: user wants lexicographic ordering on keys
 // as this is embedded, user could provide custom comparator or merge operator
 
-// TODO: add more errors
-// I'm wrapping IOError for now, but this is not useful for the end user.
-// the user is going to want specific, actionable errors
-
 // Magic vars (figure out how to make these configurable)
 // TODO: exposing these for integration test- should allow user to specify this in code
 pub const TABLES_UNTIL_COMPACTION: u8 = 3;
 pub const BLOCK_SIZE: usize = 4_000;
 pub const MAX_MEMTABLE_SIZE: usize = 1_000_000;
+
+// TODO: add more errors
+// I'm wrapping IOError for now, but this is not useful for the end user. Probably should just return some unrecoverable error and tell them to restart process/server.
+// the user is going to want specific, actionable errors
 #[derive(Debug)]
 pub enum YAStorageError {
     // TODO: should just panic if there is an ioerror, as it cannot help the user
@@ -158,7 +164,7 @@ impl Ord for TableNum {
         assert!(second.is_some());
         // if there is an error, we unfortunately cannot return it
         // TODO: cannot find an errable heap implementation, will need to spin one up
-        // could very messily make errors less than non errors and then handle an error when popping
+        // could very messily order errors to be less than non errors and then handle an error when popping
         let first = &(match first {
             Some(Ok(first)) => Some(first),
             // won't happen
@@ -213,9 +219,6 @@ impl MergedTableIterators {
 
 impl Iterator for MergedTableIterators {
     type Item = (Vec<u8>, Vec<u8>);
-    // TODO: for large sets of files (table iterators), use heaps
-    // this implementation is currently only for level iterators (k = 10) -> heap likely is slower
-    // since with small sets of files, the overhead of using heaps is lilely minimal, so could use it in either case
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.heap.is_empty() {
@@ -245,6 +248,8 @@ struct Table {
     current_block_idx: usize
 }
 
+// wrap murmur3 function so we can use it to type filter
+
 struct FastMurmur3;
 
 struct FastMurmur3Hasher {
@@ -254,6 +259,8 @@ struct FastMurmur3Hasher {
 impl Hasher for FastMurmur3Hasher {
     fn finish(&self) -> u64 {
         let big_hash: u128 = fastmurmur3::hash(&self.data);
+        // we'll just take the last 64 bits
+        // this moves the 1 to 65th spot, the subtraction carries all the way so we end up with a nice 64 bitmask
         (big_hash & ((1u128 << 64) - 1)) as u64
     }
 
@@ -277,6 +284,10 @@ impl BuildHasher for FastMurmur3 {
         FastMurmur3Hasher::default()
     }
 }
+// facade for table accesses. combines serde with knowledge of ondisk structure to provide clean api.
+// also provides API for a couple of different types of iterators to write table.
+// TODO: implementation has tons of magic values. is there a better way to do this? 
+// I think the best thing to do is isolate seek logic + offset io to internal functions
 impl Table {
     fn new(path: PathBuf, reading: bool) -> io::Result<Self> {
         if !reading && !path.parent().unwrap().exists() {
@@ -339,7 +350,7 @@ impl Table {
         // we can surely do this when compacting the current top level
         // however, how can we do this if its not the current top level?
         // could use bloom filter...however the ~97% chance tp tn exponentially decreases
-        // even by 20 tables, this is still better than guessing ~54%
+        // even by 20 tables, this is still better than guessing (~54%)
         // so if we cache the bloom filters on startup, this is an option.
         let mut index: Vec<u8> = Vec::new();
         let mut data_section: Vec<u8> = Vec::new();
@@ -383,6 +394,7 @@ impl Table {
         self.file.write_u64::<LittleEndian>(ex_filter.length as u64)?;
         self.file.write_all(&ex_filter.values)?;
         // footer: 8 bytes for index offset, 8 for filter offset, 8 for unique keys
+        // TODO: magic value
         let filter_offset = index.len() + data_section.len() + 8;
         self.file.write_u64::<LittleEndian>(data_section.len() as u64)?;
         self.file.write_u64::<LittleEndian>(filter_offset as u64)?;
@@ -392,12 +404,15 @@ impl Table {
     }
 }
 impl Iterator for Table {
+    // this iterator can return errors
     type Item = io::Result<(Vec<u8>, Vec<u8>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
         // we better open this in read mode
         assert!(self.total_data_bytes.is_some());
         if self.current_block.is_none() || self.current_block_idx == self.current_block.as_ref().unwrap().entries.len() {
+            // we better not be past the data bytes
+            assert!(self.total_data_bytes.unwrap() >= self.file.stream_position().unwrap());
             if self.total_data_bytes.unwrap() == self.file.stream_position().unwrap() {
                 // we've reached the end of the datablocks
                 return None;
@@ -414,11 +429,6 @@ impl Iterator for Table {
         return Some(Ok(kv));
     }
 }
-// bloom filter:
-// during compaction:
-// overestimate expected n by summming number of unique keys per table
-// this avoids doing a double read or more robust random sampling (many random IOs)
-// use that n and 1% false positive to find size and number of hash functions
 
 #[derive(Debug)]
 // could provide more ops in future, like the merge operator in pebble/rocksdb
@@ -510,6 +520,8 @@ impl Index {
     fn new() -> Self {
         return Index {entries: Vec::new()};
     }
+    // not efficient, not (yet) used
+    // should delete unused code
     fn get_num_bytes(&self) -> u64 {
     let mut res = 0;
     for (k, _) in self.entries.iter() {
@@ -560,6 +572,7 @@ impl DataBlock {
     fn new() -> Self {
         return DataBlock {entries: Vec::new()};
     }
+    // not efficient, not (yet) used x 2
     fn get_num_bytes(&self) -> u64 {
         let mut res = 0;
         for (k, v) in self.entries.iter() {
@@ -641,11 +654,6 @@ impl WALEntry {
     }
 }
 
-
-// in memory only, serialize to sstable
-// use skipmap/skiplist, as it could be made wait-free and it's faster than in memory b tree (and moreso when accounting for lock contentions)
-// although I am sure a wait-free tree does exist, skiplists are much simpler
-// this skiplist may or may not be wait-free...still need to look into it (maybe code my own)
 struct Memtable {
     skipmap: SkipMap<Vec<u8>, Vec<u8>>,
     size: usize
@@ -689,9 +697,9 @@ impl Tree {
             
         } else {
             let mut buffer = [0; 5];
-            // if this fails, alert the user with YAStorageError, missing header
+            // TODO: if this fails, alert the user with YAStorageError, missing header
             let mut file = File::open(self.path.clone().join("header"))?;
-            // if this fails, alert the user with YAStorageError, corrupted header
+            // TODO: if this fails, alert the user with YAStorageError, corrupted header
             file.read_exact(&mut buffer)?;
             self.tables_per_level = Some(buffer);
             self.wal_file = Some(OpenOptions::new()
@@ -708,6 +716,7 @@ impl Tree {
         // any file in those folders should be numeric
         // # of sstables should match header
         // sstable names should be increasing (0 - # - 1)
+        // header should agree with reality
         let mut num_levels: usize = 5;
         while num_levels != 0 && self.tables_per_level.unwrap()[num_levels - 1] == 0 {
             num_levels -= 1;
@@ -861,7 +870,7 @@ impl Tree {
         let mut table = Table::new(new_table_path, false)?;
         let mut tables = (0..TABLES_UNTIL_COMPACTION).map(|x| Table::new(self.path.join(level.to_string()).join(x.to_string()), true)).collect::<io::Result<Vec<Table>>>()?;
         // will at worst be a k tables * num keys overestimate
-        // unique keys recalculated each compaction, so this will remain the case
+        // unique keys recalculated each compaction, so this will not worsen
         let num_keys_estimation = tables.iter_mut().map(|x| x.get_num_unique_keys()).collect::<io::Result<Vec<u64>>>()?.into_iter().reduce(|acc, x| acc + x).unwrap();
 
         table.write_table(MergedTableIterators::new(tables)? , num_keys_estimation as usize)?;
@@ -943,6 +952,7 @@ impl Tree {
         Ok(())
     }
 
+    // TODO: both the append and fsync are too slow.
     fn add_walentry(&mut self, operation: Operation, key: &Vec<u8>, value: &Vec<u8>) -> Result<(), YAStorageError>  {
         let old_size = if self.memtable.skipmap.contains_key(key) { key.len() + self.memtable.skipmap.get(key).unwrap().value().len()} else { 0};
         let new_size = key.len() + value.len();
@@ -1229,31 +1239,3 @@ mod search_index_tests {
         assert!(search_index(&index_from_string_vector(&double), &str_to_byte_buf(&"burgeroisie")).unwrap() == 1);
     }
 }
-/* Things to test:
-persistence happens through one of three ways: memtable flush, wal restoration, compaction
-should test g/p/d in each of those scenarios
-should test key being in middle of datablock
-should test binary search function
-key found in nonfirst datablock
-
-empty k/v
-super long k/v
-
-test compaction
-
-out of space
-test recovery - difficult to test this (could make any IO fail, but how can I do this without mocking every IO)
-performance
-
-big honking test
-
-fuzz testing
-think of more
-
-future tests:
-concurrency
-merge operator
-custom comparator
-(different compaction strategies?)
-
- */
