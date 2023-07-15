@@ -18,3 +18,11 @@ Concurrency could speed up a few parts of this application. There are a lot of m
 - WAL: tasks should tell WALBatchWriter to write some kv and block until it has flushed. WALBatchWriter should either wait until k records or m miliseconds (maybe 4kb, 5ms)
 - Datablock/index/filter caching: we should be able to concurrently resolve requests and follow LRU rules with maximum in memory limits
 - File System (multiprocess): Only one embedded server should run at once. Should acquire some OS directory lock/lease
+
+## Concurrent Design and Tradeoffs
+- Opting for simpler, coarse-grained locks, this beginning design is very simple
+- Check main directory
+- Reads will execute fully concurrently
+- Individual latency will increase from lock contention and execution reordering
+- Write throughput should increase
+- Overall time spent on WAL io should decrease (hopefully by 90% or more)
