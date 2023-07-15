@@ -13,7 +13,7 @@ path = "src/client.rs"
 
 [[bin]]
 name = "storage"
-path = "src/storage.rs"
+path = "src/storage/mod.rs"
 
 [dependencies]
 log = "0.4.17"

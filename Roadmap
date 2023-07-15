@@ -1,19 +1,22 @@
 Implementing all of these is time consuming. Need to prioritize so I can implement distributed kv store (almost ready)/sql database (need db iterator, performance enhancements)
+RIGHT NOW:
+
+- clean up file structure
+- asyncify code/tests (use tokio)
+- implement concurrent design + buffered wal appends
+- write concurrent test
+- extract magic variables to config (in cargo.toml)
+
 TODO:
-- profile and see what is taking so long (wal appends + fsync)
 - utilize bloom filters on reads (these seem to be nondeterministic, need to debug)
 - implement iterator (when do iterators become invalid? should I go about a similar scheme to rocksdb (where iterators block operations that invalidate them)? how would I implement that?)
 - create/find benchmarks
 - implement filter/index/block cache (need to undo mem::replace for datablocks)
 
 TODO LATER (NEEDS PRIORITIZATION):
-
-- verify db durability + implement FS level manifest WAL to handle non atomic FS operations (varies OS to OS, everything should be atomic if POSIX compliant)
-- make code structure follow rust file structure
-- asyncify code (use tokio)
+- verify db durability + implement FS level manifest WAL to handle multiple/non atomic FS operations (varies OS to OS, everything should be atomic if POSIX compliant)
 - eliminate needless copies (is this done)
 - implement custom merge operator
-- extract magic variables to config (in cargo.toml)
 - extend errors so they are more actionable
 - implement multithreaded compaction
 - write fuzzer
@@ -21,10 +24,28 @@ TODO LATER (NEEDS PRIORITIZATION):
 - abstract away touching any files
 - implement multithreaded writes/reads
 - rate limit compaction (static, additive/multiplicative increase, multiplicative decrease)
-- support tables
-- compression
-- checksums
+- support tables (tuples for values)
+- compression/checksums (GZIP)
+- allow user to customize compression/checksums
 - more stuff for dbs (merkle tree differences, transactions, configuring WAL log so it can hook up to replication logs like Raft)
 - more verification (both just in time and defensive checks)
 - monitoring
 - multiget/multiput (see rocksdb)
+
+
+metrics to implement:
+- wal replays
+- wal replay total bytes
+- # sstables
+- disk usage
+- avg/median sstable size
+- overhead (lsm size) / (number of all bytes of keys, values, not including lengths)
+- read ios / read operation
+- write ios / write operation
+- corruption
+- filter false positive rate
+- cache hit rate
+- table iterations (iterators)
+- lock contention times (for r/w, for memtable/fs)
+- io time
+- compression time

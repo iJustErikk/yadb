@@ -4,39 +4,16 @@ extern crate sled;
 
 use log::{info, warn, LevelFilter};
 use simplelog::{ColorChoice, CombinedLogger, Config, TermLogger, TerminalMode, WriteLogger};
-use sled::Tree;
 
 use std::fs::File;
 use std::io::{Error as IoError, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 
+pub mod storage;
+use storage::{Tree};
 
-struct LSMTree {
-    tree: Tree,
-}
-
-impl LSMTree {
-    fn new(tree: Tree) -> Self {
-        LSMTree { tree }
-    }
-
-    fn put(&self, key: &[u8], value: &[u8]) -> sled::Result<()> {
-        self.tree.insert(key, value)?;
-        Ok(())
-    }
-
-    fn get(&self, key: &[u8]) -> sled::Result<Option<sled::IVec>> {
-        self.tree.get(key)
-    }
-
-    fn delete(&self, key: &[u8]) -> sled::Result<()> {
-        self.tree.remove(key)?;
-        Ok(())
-    }
-}
-
-fn handle_client(mut stream: TcpStream, storage: &LSMTree) {
+fn handle_client(mut stream: TcpStream, storage: &mut Tree) {
     loop {
         match read_client_command(&mut stream) {
             Ok(command) => {
@@ -66,24 +43,24 @@ fn read_client_command(stream: &mut TcpStream) -> Result<Vec<String>, IoError> {
     Ok(command)
 }
 
-fn process_command(command: &[String], storage: &LSMTree) -> String {
+fn process_command(command: &[String], storage: &mut Tree) -> String {
     match command.get(0).map(String::as_str) {
         Some("put") if command.len() == 3 => {
-            let key = command[1].as_bytes();
-            let value = command[2].as_bytes();
-            storage.put(key, value).unwrap();
+            let key = command[1].as_bytes().to_vec();
+            let value = command[2].as_bytes().to_vec();
+            storage.put(&key, &value).unwrap();
             "Success\n".to_string()
         }
         Some("get") if command.len() == 2 => {
-            let key = command[1].as_bytes();
-            match storage.get(key).unwrap() {
+            let key = command[1].as_bytes().to_vec();
+            match storage.get(&key).unwrap() {
                 Some(value) => String::from_utf8(value.to_vec()).unwrap() + "\n",
                 None => "Key not found\n".to_string(),
             }
         }
         Some("delete") if command.len() == 2 => {
-            let key = command[1].as_bytes();
-            storage.delete(key).unwrap();
+            let key = command[1].as_bytes().to_vec();
+            storage.delete(&key).unwrap();
             "Success\n".to_string()
         }
         _ => "Invalid command\n".to_string(),
@@ -110,9 +87,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     CombinedLogger::init(vec![term_logger, write_logger])
         .expect("Failed to initialize combined logger");
 
-    let db = sled::open("yadb").unwrap();
-    let tree = db.open_tree("default").unwrap();
-    let storage = LSMTree::new(tree);
+    let mut db = Tree::new("yadb");
+    // pretty innit
+    db.init()?;
 
     let listener = TcpListener::bind("127.0.0.1:8000").unwrap();
     info!("server up");
@@ -120,7 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for stream in listener.incoming() {
         let stream = stream.unwrap();
         info!("client at: {}", stream.peer_addr().unwrap());
-        handle_client(stream, &storage);
+        handle_client(stream, &mut db);
     }
 
     Ok(())

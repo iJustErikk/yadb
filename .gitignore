@@ -1,6 +1,5 @@
 target/
 yadb/
 log
-storage
 profile.svg
 perf.*
