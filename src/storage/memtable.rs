@@ -4,5 +4,5 @@ use self::crossbeam_skiplist::SkipMap;
 pub struct Memtable {
     // TODO: should not be pub :)
     pub skipmap: SkipMap<Vec<u8>, Vec<u8>>,
-    pub size: usize
+    pub size: usize,
 }

@@ -7,8 +7,6 @@ use std::error::Error;
 extern crate yadb;
 use yadb::storage::*;
 
-
-
 fn str_to_byte_buf(s: &String) -> Vec<u8> {
     return s.as_bytes().to_vec();
 }
@@ -35,7 +33,7 @@ fn gpd_flush() -> Result<(), Box<dyn Error>> {
             assert!(tree.get(&(str_to_byte_buf(&key)))?.is_none());
         }
     }
-    assert!(tree.get(&vec![0,1])?.is_none());
+    assert!(tree.get(&vec![0, 1])?.is_none());
     Ok(())
 }
 #[test]
@@ -105,8 +103,10 @@ fn gpd_compaction() -> Result<(), Box<dyn Error>> {
             let key = j.to_string();
             let value = i.to_string();
             if i != 0 {
-                let prev_value = (i-1).to_string();
-                assert!(tree.get(&(str_to_byte_buf(&key)))?.unwrap() == str_to_byte_buf(&prev_value));
+                let prev_value = (i - 1).to_string();
+                assert!(
+                    tree.get(&(str_to_byte_buf(&key)))?.unwrap() == str_to_byte_buf(&prev_value)
+                );
             }
             tree.delete(&(str_to_byte_buf(&key)))?;
             tree.put(&(str_to_byte_buf(&key)), &str_to_byte_buf(&value))?;

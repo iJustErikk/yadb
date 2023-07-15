@@ -1,4 +1,6 @@
+use self::fs::File;
 use std::cell::RefCell;
+use std::fs;
 use std::hash::BuildHasher;
 use std::hash::Hasher;
 use std::io;
@@ -6,51 +8,57 @@ use std::io::Cursor;
 use std::io::Seek;
 use std::io::SeekFrom;
 use std::iter::Peekable;
-use std::fs;
 use std::path::PathBuf;
-use self::fs::File;
-
 
 extern crate cuckoofilter;
 use self::cuckoofilter::CuckooFilter;
 
 extern crate byteorder;
 use self::byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use std::io::Write;
-use std::io::Read;
 use std::collections::BinaryHeap;
+use std::io::Read;
+use std::io::Write;
 
 // facade for table accesses. combines serde with knowledge of ondisk structure to provide clean api.
 // also provides API for a couple of different types of iterators to write table.
-// TODO: implementation has tons of magic values. is there a better way to do this? 
+// TODO: implementation has tons of magic values. is there a better way to do this?
 // I think the best thing to do is isolate seek logic + offset io to internal functions
 pub struct Table {
     file: File,
     total_data_bytes: Option<u64>,
     current_block: Option<DataBlock>,
-    current_block_idx: usize
+    current_block_idx: usize,
 }
 
 pub const BLOCK_SIZE: usize = 4_000;
-
 
 impl Table {
     pub fn new(path: PathBuf, reading: bool) -> io::Result<Self> {
         if !reading && !path.parent().unwrap().exists() {
             fs::create_dir(path.parent().unwrap())?;
         }
-        let mut file = if reading { File::open(&path)? } else { File::create(&path)?};
+        let mut file = if reading {
+            File::open(&path)?
+        } else {
+            File::create(&path)?
+        };
         let total_data_bytes = None;
         if reading {
             file.seek(SeekFrom::End(-24))?;
             let total_data_bytes = Some(file.read_u64::<LittleEndian>()?);
             file.seek(SeekFrom::Start(0))?;
             return Ok(Table {
-                file, total_data_bytes, current_block: None, current_block_idx: 0
-            })
+                file,
+                total_data_bytes,
+                current_block: None,
+                current_block_idx: 0,
+            });
         }
         return Ok(Table {
-            file, total_data_bytes, current_block: None, current_block_idx: 0
+            file,
+            total_data_bytes,
+            current_block: None,
+            current_block_idx: 0,
         });
     }
     // TODO: rework this to become private
@@ -90,8 +98,11 @@ impl Table {
         self.file.seek(SeekFrom::Start(0))?;
         return Ok(db);
     }
-    
-    pub fn write_table<I>(&mut self, it: I, num_unique_keys: usize) -> io::Result<()>  where I: IntoIterator<Item=(Vec<u8>, Vec<u8>)>, {
+
+    pub fn write_table<I>(&mut self, it: I, num_unique_keys: usize) -> io::Result<()>
+    where
+        I: IntoIterator<Item = (Vec<u8>, Vec<u8>)>,
+    {
         // TODO: I could convert these to use the serialize function for DataBlock + Index
         // this would present overhead, as they would most likely be copied into the ds just to be written out
         // but it would keep the logic for serde in one impl
@@ -140,12 +151,14 @@ impl Table {
         self.file.write_u64::<LittleEndian>(index.len() as u64)?;
         self.file.write_all(&index)?;
         let ex_filter = cf.export();
-        self.file.write_u64::<LittleEndian>(ex_filter.length as u64)?;
+        self.file
+            .write_u64::<LittleEndian>(ex_filter.length as u64)?;
         self.file.write_all(&ex_filter.values)?;
         // footer: 8 bytes for index offset, 8 for filter offset, 8 for unique keys
         // TODO: magic value
         let filter_offset = index.len() + data_section.len() + 8;
-        self.file.write_u64::<LittleEndian>(data_section.len() as u64)?;
+        self.file
+            .write_u64::<LittleEndian>(data_section.len() as u64)?;
         self.file.write_u64::<LittleEndian>(filter_offset as u64)?;
         self.file.write_u64::<LittleEndian>(unique_keys)?;
         self.file.sync_all()?;
@@ -160,7 +173,9 @@ impl Iterator for Table {
     fn next(&mut self) -> Option<Self::Item> {
         // we better open this in read mode
         assert!(self.total_data_bytes.is_some());
-        if self.current_block.is_none() || self.current_block_idx == self.current_block.as_ref().unwrap().entries.len() {
+        if self.current_block.is_none()
+            || self.current_block_idx == self.current_block.as_ref().unwrap().entries.len()
+        {
             // we better not be past the data bytes
             assert!(self.total_data_bytes.unwrap() >= self.file.stream_position().unwrap());
             if self.total_data_bytes.unwrap() == self.file.stream_position().unwrap() {
@@ -174,7 +189,10 @@ impl Iterator for Table {
             self.current_block = Some(current_block.unwrap());
             self.current_block_idx = 0;
         }
-        let kv = std::mem::replace(&mut self.current_block.as_mut().unwrap().entries[self.current_block_idx], (Vec::new(), Vec::new()));
+        let kv = std::mem::replace(
+            &mut self.current_block.as_mut().unwrap().entries[self.current_block_idx],
+            (Vec::new(), Vec::new()),
+        );
         self.current_block_idx += 1;
         return Some(Ok(kv));
     }
@@ -182,7 +200,7 @@ impl Iterator for Table {
 
 // TODO: expose search_entries to keep this private
 pub struct DataBlock {
-    pub entries: Vec<(Vec<u8>, Vec<u8>)>
+    pub entries: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl DataBlock {
@@ -198,14 +216,13 @@ impl DataBlock {
             let mut key = vec![0; key_size as usize];
             cursor.read_exact(&mut key)?;
 
-
             let value_size = cursor.read_u64::<LittleEndian>()?;
             let mut value = vec![0; value_size as usize];
             cursor.read_exact(&mut value)?;
             entries.push((key, value));
         }
 
-        Ok(DataBlock{entries: entries})
+        Ok(DataBlock { entries: entries })
     }
 }
 
@@ -242,7 +259,7 @@ impl Index {
             bytes_read += 2 * u64_num_bytes + key_size;
             entries.push((key, offset));
         }
-        Ok(Index{entries})
+        Ok(Index { entries })
     }
 }
 
@@ -251,61 +268,60 @@ pub struct Index {
 }
 
 // TODO: allow user to supply custom comparators
-    // returns the bucket a key is potentially inside
-    // each bucket i is [start key at i, start key at i + 1)
-    // binary search over i
-    // find i such that key is in the bucket
-    // note: this always returns the last bucket for a key that is larger than the last bucket start key
-    // if key in range, return mid
-    // if key < start key, move right pointer to mid
-    // if key >= next start key, move left pointer to right
-    // proof of correctness:
-    // assume value is in some bucket in the array
-    // if throughout the execution the value is in the range of buckets, then it is correct
-    // if all search space cuts preserve this, then we will return the bucket containing, as eventually
-    // ...there will be only 1 bucket and that has to satisfy the property (could do proof by contradiction, see that if this was not the case...
-    //  then there would be a different partitioning of the search space and thus a different last block)
-    // if key < index_keys[mid] -> cuts right half (keeps mid's block), very much still in there
-    // if key >= index_keys[mid + 1] -> cuts left half -> left half is known to be less
-    // these maintain our containing invariant so this is correct
-    // TODO: shouldn't this be private? we should steal search_table from other Tree
-    pub fn search_index(index: &Index, key: &Vec<u8>) -> Option<u64> {
-        assert!(index.entries.len() != 0);
-        assert!(key.len() != 0);
-        if key < &index.entries[0].0 {
-            return None
+// returns the bucket a key is potentially inside
+// each bucket i is [start key at i, start key at i + 1)
+// binary search over i
+// find i such that key is in the bucket
+// note: this always returns the last bucket for a key that is larger than the last bucket start key
+// if key in range, return mid
+// if key < start key, move right pointer to mid
+// if key >= next start key, move left pointer to right
+// proof of correctness:
+// assume value is in some bucket in the array
+// if throughout the execution the value is in the range of buckets, then it is correct
+// if all search space cuts preserve this, then we will return the bucket containing, as eventually
+// ...there will be only 1 bucket and that has to satisfy the property (could do proof by contradiction, see that if this was not the case...
+//  then there would be a different partitioning of the search space and thus a different last block)
+// if key < index_keys[mid] -> cuts right half (keeps mid's block), very much still in there
+// if key >= index_keys[mid + 1] -> cuts left half -> left half is known to be less
+// these maintain our containing invariant so this is correct
+// TODO: shouldn't this be private? we should steal search_table from other Tree
+pub fn search_index(index: &Index, key: &Vec<u8>) -> Option<u64> {
+    assert!(index.entries.len() != 0);
+    assert!(key.len() != 0);
+    if key < &index.entries[0].0 {
+        return None;
+    }
+
+    let mut left = 0;
+    let mut right = index.entries.len() - 1;
+    loop {
+        let mid = (left + right) / 2;
+        if mid == index.entries.len() - 1 {
+            assert!(key >= &index.entries[index.entries.len() - 1].0);
+            return Some(index.entries[mid].1);
         }
-        
-        let mut left = 0;
-        let mut right = index.entries.len() - 1;
-        loop {
-            let mid = (left + right) / 2;
-            if mid == index.entries.len() - 1 {
-                assert!(key >= &index.entries[index.entries.len() - 1].0);
-                return Some(index.entries[mid].1);
-            }
-            if key < &index.entries[mid].0 {
-                right = mid;
-            } else if key >= &index.entries[mid + 1].0  {
-                left = mid + 1;
-            } else {
-                // if key > start && < end -> in bucket
-                return Some(index.entries[mid].1);
-            }
+        if key < &index.entries[mid].0 {
+            right = mid;
+        } else if key >= &index.entries[mid + 1].0 {
+            left = mid + 1;
+        } else {
+            // if key > start && < end -> in bucket
+            return Some(index.entries[mid].1);
         }
+    }
 }
 pub struct MergedTableIterators {
-    heap: BinaryHeap<TableNum>
+    heap: BinaryHeap<TableNum>,
 }
 
 struct TableNum {
     // we are using refcell so we can peek
-    table: RefCell<Peekable<Table>>, 
-    num: usize
+    table: RefCell<Peekable<Table>>,
+    num: usize,
 }
 
 impl Eq for TableNum {}
-
 
 impl PartialEq for TableNum {
     fn eq(&self, other: &Self) -> bool {
@@ -334,13 +350,17 @@ impl Ord for TableNum {
         let first = &(match first {
             Some(Ok(first)) => Some(first),
             // won't happen
-            _ => None
-        }.unwrap().0);
+            _ => None,
+        }
+        .unwrap()
+        .0);
         let second = &(match second {
             Some(Ok(second)) => Some(second),
             // won't happen
-            _ => None
-        }.unwrap().0);
+            _ => None,
+        }
+        .unwrap()
+        .0);
         let first = (first, self.num);
         let second = (second, other.num);
         // order first by peeked key ref, then by table number (higher is younger and higher)
@@ -377,9 +397,12 @@ impl MergedTableIterators {
                 let next = peekable_table.next().unwrap().err().unwrap();
                 return Err(next);
             }
-            heap.push(TableNum{table: RefCell::new(peekable_table), num});
+            heap.push(TableNum {
+                table: RefCell::new(peekable_table),
+                num,
+            });
         }
-        return Ok(MergedTableIterators { heap })
+        return Ok(MergedTableIterators { heap });
     }
 }
 
@@ -428,9 +451,7 @@ impl Hasher for FastMurmur3Hasher {
 
 impl Default for FastMurmur3Hasher {
     fn default() -> Self {
-        Self {
-            data: Vec::new(),
-        }
+        Self { data: Vec::new() }
     }
 }
 
@@ -451,39 +472,113 @@ mod search_index_tests {
     }
     fn index_from_string_vector(slice: &[&str]) -> Index {
         return Index {
-            entries: slice.iter().enumerate().map(|(i, &x)| (str_to_byte_buf(x), i as u64)).collect()
-        }
+            entries: slice
+                .iter()
+                .enumerate()
+                .map(|(i, &x)| (str_to_byte_buf(x), i as u64))
+                .collect(),
+        };
     }
     // for these tests: vector ordering is lexicographic, so it will respect 1 byte character strings
     #[test]
     fn test_out_of_range_to_the_left() {
         let index = ["bombastic", "sideeye"];
-        assert!(search_index(&index_from_string_vector(&index), &str_to_byte_buf(&"aeon")).is_none());
+        assert!(
+            search_index(&index_from_string_vector(&index), &str_to_byte_buf(&"aeon")).is_none()
+        );
     }
     #[test]
     fn test_item_first_middle_last() {
         let index = ["affluent", "burger", "comes", "to", "town", "sunday"];
-        assert!(search_index(&index_from_string_vector(&index), &str_to_byte_buf(&"apple")).unwrap() == 0);
-        assert!(search_index(&index_from_string_vector(&index), &str_to_byte_buf(&"todler")).unwrap() == 3);
-        assert!(search_index(&index_from_string_vector(&index), &str_to_byte_buf(&"zephyr")).unwrap() == 5);
-
-    }    // test item on boundary of buckets (just barely less than the next)
+        assert!(
+            search_index(
+                &index_from_string_vector(&index),
+                &str_to_byte_buf(&"apple")
+            )
+            .unwrap()
+                == 0
+        );
+        assert!(
+            search_index(
+                &index_from_string_vector(&index),
+                &str_to_byte_buf(&"todler")
+            )
+            .unwrap()
+                == 3
+        );
+        assert!(
+            search_index(
+                &index_from_string_vector(&index),
+                &str_to_byte_buf(&"zephyr")
+            )
+            .unwrap()
+                == 5
+        );
+    } // test item on boundary of buckets (just barely less than the next)
     #[test]
     fn test_left_right_bounary() {
         let index = ["affluent", "burger", "comes"];
-        assert!(search_index(&index_from_string_vector(&index), &str_to_byte_buf(&"burger")).unwrap() == 1);
-        assert!(search_index(&index_from_string_vector(&index), &str_to_byte_buf(&"comeq")).unwrap() == 1);
-        assert!(search_index(&index_from_string_vector(&index), &str_to_byte_buf(&"comes")).unwrap() == 2);
-
+        assert!(
+            search_index(
+                &index_from_string_vector(&index),
+                &str_to_byte_buf(&"burger")
+            )
+            .unwrap()
+                == 1
+        );
+        assert!(
+            search_index(
+                &index_from_string_vector(&index),
+                &str_to_byte_buf(&"comeq")
+            )
+            .unwrap()
+                == 1
+        );
+        assert!(
+            search_index(
+                &index_from_string_vector(&index),
+                &str_to_byte_buf(&"comes")
+            )
+            .unwrap()
+                == 2
+        );
     }
     #[test]
     fn test_single_two_item_index() {
         let single = ["affluent"];
         let double = ["affluent", "burger"];
-        assert!(search_index(&index_from_string_vector(&single), &str_to_byte_buf(&"affluent")).unwrap() == 0);
-        assert!(search_index(&index_from_string_vector(&single), &str_to_byte_buf(&"burger")).unwrap() == 0);
-        assert!(search_index(&index_from_string_vector(&double), &str_to_byte_buf(&"aging")).unwrap() == 0);
+        assert!(
+            search_index(
+                &index_from_string_vector(&single),
+                &str_to_byte_buf(&"affluent")
+            )
+            .unwrap()
+                == 0
+        );
+        assert!(
+            search_index(
+                &index_from_string_vector(&single),
+                &str_to_byte_buf(&"burger")
+            )
+            .unwrap()
+                == 0
+        );
+        assert!(
+            search_index(
+                &index_from_string_vector(&double),
+                &str_to_byte_buf(&"aging")
+            )
+            .unwrap()
+                == 0
+        );
         // Hired as eng. Promoted to pun master.
-        assert!(search_index(&index_from_string_vector(&double), &str_to_byte_buf(&"burgeroisie")).unwrap() == 1);
+        assert!(
+            search_index(
+                &index_from_string_vector(&double),
+                &str_to_byte_buf(&"burgeroisie")
+            )
+            .unwrap()
+                == 1
+        );
     }
 }
