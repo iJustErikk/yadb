@@ -29,6 +29,8 @@ use self::errors::YAStorageError;
 mod table;
 use self::table::{search_index, MergedTableIterators, Table};
 
+
+
 // look into: no copy network -> fs, I believe kafka does something like this
 // TODO: go through with checklist to make sure the database can fail at any point during wal replay, compaction or memtable flush
 
@@ -66,16 +68,14 @@ impl Tree {
             },
         };
     }
-    pub fn init(&mut self) -> Result<(), YAStorageError> {
-        self.init_folder()?;
 
+    pub async fn init(&mut self) -> Result<(), YAStorageError> {
+        self.init_folder().await?;
         self.general_sanity_check()?;
-
-        self.restore_wal()?;
-
+        self.restore_wal().await?;
         Ok(())
     }
-    fn init_folder(&mut self) -> Result<(), YAStorageError> {
+    async fn init_folder(&mut self) -> Result<(), YAStorageError> {
         // TODO:
         // right now we just pass the error up to the user
         // we should probably send them a custom error with steps to fix
@@ -345,7 +345,7 @@ impl Tree {
         Ok(())
     }
 
-    fn append_to_wal(&mut self, entry: WALEntry) -> io::Result<()> {
+    async fn append_to_wal(&mut self, entry: WALEntry) -> io::Result<()> {
         entry
             .serialize(&mut (self.wal_file.as_mut().unwrap()))
             .await?;
@@ -354,7 +354,7 @@ impl Tree {
         Ok(())
     }
 
-    fn restore_wal(&mut self) -> io::Result<()> {
+    async fn restore_wal(&mut self) -> io::Result<()> {
         let mut entries = Vec::new();
         assert!(self.path.join("wal").exists());
         loop {
@@ -400,7 +400,7 @@ impl Tree {
     }
 
     // TODO: both the append and fsync are too slow.
-    fn add_walentry(
+    async fn add_walentry(
         &mut self,
         operation: Operation,
         key: &Vec<u8>,
@@ -429,7 +429,7 @@ impl Tree {
             operation,
             key: key.to_vec(),
             value: value.to_vec(),
-        })?;
+        }).await?;
         // TODO: no magic values
         // add config setting
 
@@ -443,18 +443,18 @@ impl Tree {
         Ok(())
     }
 
-    pub fn put(&mut self, key: &Vec<u8>, value: &Vec<u8>) -> Result<(), YAStorageError> {
+    pub async fn put(&mut self, key: &Vec<u8>, value: &Vec<u8>) -> Result<(), YAStorageError> {
         assert!(key.len() != 0);
         // empty length value is tombstone
         assert!(value.len() != 0);
-        self.add_walentry(Operation::PUT, key, value)?;
+        self.add_walentry(Operation::PUT, key, value).await?;
         Ok(())
     }
 
-    pub fn delete(&mut self, key: &Vec<u8>) -> Result<(), YAStorageError> {
+    pub async fn delete(&mut self, key: &Vec<u8>) -> Result<(), YAStorageError> {
         assert!(key.len() != 0);
         // empty value is tombstone
-        self.add_walentry(Operation::DELETE, key, &Vec::new())?;
+        self.add_walentry(Operation::DELETE, key, &Vec::new()).await?;
         Ok(())
     }
 }
@@ -478,11 +478,11 @@ mod init_tests {
     // TODO: these check for the existence of some error
     // however, they should check for the particular error that arises
     // will fix this when I fix the API. I should be returning custom errors to the user
-    #[test]
-    fn test_init_create() -> Result<(), Box<dyn Error>> {
+    #[tokio::test]
+    async fn test_init_create() -> Result<(), Box<dyn Error>> {
         let dir = tempdir()?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
-        tree.init_folder().expect("Failed to init folder");
+        tree.init_folder().await.expect("Failed to init folder");
         let header_path = dir.path().clone().join("header");
         let wal_path = dir.path().clone().join("header");
         assert!(header_path.exists());
@@ -496,58 +496,58 @@ mod init_tests {
     }
     // going to simply create another tree for convenience
     // TODO: figure this out with tree locking scheme
-    #[test]
-    fn missing_header() -> Result<(), Box<dyn Error>> {
+    #[tokio::test]
+    async fn missing_header() -> Result<(), Box<dyn Error>> {
         // the following 3 lines are pretty repetitive
         // i'm going to opt out of using a helper function, as i am sure this will not change
         // and it will be roughly the same LOC
         let dir = tempdir()?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
-        tree.init_folder().expect("Failed to init folder");
+        tree.init_folder().await.expect("Failed to init folder");
         remove_file(dir.path().join("header"))?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
-        assert!(tree.init().is_err());
+        assert!(tree.init().await.is_err());
         Ok(())
     }
-    #[test]
-    fn missing_wal() -> Result<(), Box<dyn Error>> {
+    #[tokio::test]
+    async fn missing_wal() -> Result<(), Box<dyn Error>> {
         let dir = tempdir()?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
-        tree.init_folder().expect("Failed to init folder");
+        tree.init_folder().await.expect("Failed to init folder");
         remove_file(dir.path().join("wal"))?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
-        assert!(tree.init().is_err());
+        assert!(tree.init().await.is_err());
         Ok(())
     }
-    #[test]
-    fn extraneous_file_root() -> Result<(), Box<dyn Error>> {
+    #[tokio::test]
+    async fn extraneous_file_root() -> Result<(), Box<dyn Error>> {
         let dir = tempdir()?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
-        tree.init_folder().expect("Failed to init folder");
+        tree.init_folder().await.expect("Failed to init folder");
         File::create(dir.path().join("test"))?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
-        assert!(tree.init().is_err());
+        assert!(tree.init().await.is_err());
         Ok(())
     }
-    #[test]
-    fn extraneous_folder_root() -> Result<(), Box<dyn Error>> {
+    #[tokio::test]
+    async fn extraneous_folder_root() -> Result<(), Box<dyn Error>> {
         let dir = tempdir()?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
-        tree.init_folder().expect("Failed to init folder");
+        tree.init_folder().await.expect("Failed to init folder");
         create_dir(dir.path().join("test"))?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
-        assert!(tree.init().is_err());
+        assert!(tree.init().await.is_err());
         remove_dir(dir.path().join("test"))?;
         create_dir(dir.path().join("5"))?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
-        assert!(tree.init().is_err());
+        assert!(tree.init().await.is_err());
         Ok(())
     }
-    #[test]
-    fn extraneous_file_nonroot() -> Result<(), Box<dyn Error>> {
+    #[tokio::test]
+    async fn extraneous_file_nonroot() -> Result<(), Box<dyn Error>> {
         let dir = tempdir()?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
-        tree.init_folder().expect("Failed to init folder");
+        tree.init_folder().await.expect("Failed to init folder");
         // for some level to exist, we need a sstable
         // TODO: there can be a case where a level folder (other than 0) exists, but there are no tables inside (failure during compaction)
         // see if this presents any issues
@@ -559,14 +559,14 @@ mod init_tests {
         File::create(dir.path().join("0").join("0"))?;
         File::create(dir.path().join("0").join("test"))?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
-        tree.init_folder().expect("Failed to init folder");
+        tree.init_folder().await.expect("Failed to init folder");
         Ok(())
     }
-    #[test]
-    fn extraneous_folder_nonroot() -> Result<(), Box<dyn Error>> {
+    #[tokio::test]
+    async fn extraneous_folder_nonroot() -> Result<(), Box<dyn Error>> {
         let dir = tempdir()?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
-        tree.init_folder().expect("Failed to init folder");
+        tree.init_folder().await.expect("Failed to init folder");
 
         let mut header_file = File::create(dir.path().join("header"))?;
         let new_header: [u8; 5] = [1, 0, 0, 0, 0];
@@ -574,14 +574,14 @@ mod init_tests {
         create_dir(dir.path().join("0"))?;
         create_dir(dir.path().join("0").join("0"))?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
-        tree.init_folder().expect("Failed to init folder");
+        tree.init_folder().await.expect("Failed to init folder");
         Ok(())
     }
-    #[test]
-    fn non_contiguous_sstables() -> Result<(), Box<dyn Error>> {
+    #[tokio::test]
+    async fn non_contiguous_sstables() -> Result<(), Box<dyn Error>> {
         let dir = tempdir()?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
-        tree.init_folder().expect("Failed to init folder");
+        tree.init_folder().await.expect("Failed to init folder");
         let mut header_file = File::create(dir.path().join("header"))?;
         let new_header: [u8; 5] = [2, 0, 0, 0, 0];
         header_file.write_all(&new_header)?;
@@ -589,28 +589,28 @@ mod init_tests {
         File::create(dir.path().join("0").join("0"))?;
         File::create(dir.path().join("0").join("2"))?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
-        tree.init_folder().expect("Failed to init folder");
+        tree.init_folder().await.expect("Failed to init folder");
         Ok(())
     }
-    #[test]
-    fn no_zero_sstable() -> Result<(), Box<dyn Error>> {
+    #[tokio::test]
+    async fn no_zero_sstable() -> Result<(), Box<dyn Error>> {
         let dir = tempdir()?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
-        tree.init_folder().expect("Failed to init folder");
+        tree.init_folder().await.expect("Failed to init folder");
         let mut header_file = File::create(dir.path().join("header"))?;
         let new_header: [u8; 5] = [1, 0, 0, 0, 0];
         header_file.write_all(&new_header)?;
         create_dir(dir.path().join("0"))?;
         File::create(dir.path().join("0").join("1"))?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
-        tree.init_folder().expect("Failed to init folder");
+        tree.init_folder().await.expect("Failed to init folder");
         Ok(())
     }
-    #[test]
-    fn sstables_header_mismatch() -> Result<(), Box<dyn Error>> {
+    #[tokio::test]
+    async fn sstables_header_mismatch() -> Result<(), Box<dyn Error>> {
         let dir = tempdir()?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
-        tree.init_folder().expect("Failed to init folder");
+        tree.init_folder().await.expect("Failed to init folder");
         let mut header_file = File::create(dir.path().join("header"))?;
         let new_header: [u8; 5] = [3, 1, 0, 0, 0];
         // we'll make it so there are only 2 sstables in the first level
@@ -621,7 +621,7 @@ mod init_tests {
         create_dir(dir.path().join("1"))?;
         File::create(dir.path().join("0").join("0"))?;
         let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
-        tree.init_folder().expect("Failed to init folder");
+        tree.init_folder().await.expect("Failed to init folder");
         Ok(())
     }
 }

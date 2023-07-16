@@ -1,6 +1,5 @@
 extern crate log;
 extern crate simplelog;
-extern crate sled;
 
 use log::{info, warn, LevelFilter};
 use simplelog::{ColorChoice, CombinedLogger, Config, TermLogger, TerminalMode, WriteLogger};
@@ -13,14 +12,14 @@ use std::path::Path;
 pub mod storage;
 use storage::{Tree};
 
-fn handle_client(mut stream: TcpStream, storage: &mut Tree) {
+async fn handle_client(mut stream: TcpStream, storage: &mut Tree) {
     loop {
         match read_client_command(&mut stream) {
             Ok(command) => {
                 if command.is_empty() {
                     continue;
                 }
-                let response = process_command(&command, storage);
+                let response = process_command(&command, storage).await;
                 if let Err(e) = send_response(&mut stream, &response) {
                     warn!("Network: Response: {}", e);
                 }
@@ -43,12 +42,12 @@ fn read_client_command(stream: &mut TcpStream) -> Result<Vec<String>, IoError> {
     Ok(command)
 }
 
-fn process_command(command: &[String], storage: &mut Tree) -> String {
+async fn process_command(command: &[String], storage: &mut Tree) -> String {
     match command.get(0).map(String::as_str) {
         Some("put") if command.len() == 3 => {
             let key = command[1].as_bytes().to_vec();
             let value = command[2].as_bytes().to_vec();
-            storage.put(&key, &value).unwrap();
+            storage.put(&key, &value).await.unwrap();
             "Success\n".to_string()
         }
         Some("get") if command.len() == 2 => {
@@ -60,7 +59,7 @@ fn process_command(command: &[String], storage: &mut Tree) -> String {
         }
         Some("delete") if command.len() == 2 => {
             let key = command[1].as_bytes().to_vec();
-            storage.delete(&key).unwrap();
+            storage.delete(&key).await.unwrap();
             "Success\n".to_string()
         }
         _ => "Invalid command\n".to_string(),
@@ -70,8 +69,8 @@ fn process_command(command: &[String], storage: &mut Tree) -> String {
 fn send_response(stream: &mut TcpStream, response: &str) -> Result<(), IoError> {
     stream.write_all(response.as_bytes())
 }
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let log_path = Path::new("./logs/log");
     let log_file = File::create(log_path).expect("Failed to create log file");
 
@@ -89,7 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut db = Tree::new("yadb");
     // pretty innit
-    db.init()?;
+    db.init().await?;
 
     let listener = TcpListener::bind("127.0.0.1:8000").unwrap();
     info!("server up");
