@@ -268,7 +268,7 @@ impl Tree {
         return Ok(None);
     }
 
-    fn write_skipmap_as_sstable(&mut self) -> io::Result<()> {
+    fn write_skipmap_as_sstable(&mut self, skipmap: SkipMap<Vec<u8>, Vec<u8>>) -> io::Result<()> {
         let table_to_write = self.ts.tables_per_level.unwrap()[0];
         if !self.ts.path.join("0").exists() {
             fs::create_dir(self.ts.path.join("0"))?;
@@ -279,26 +279,20 @@ impl Tree {
         // otherwise we are shooting ourselves in the foot
         assert!(!self.ts.path.join("0").join(filename.to_string()).exists());
 
-        // TODO: begin write by creating table, then passing iterator for writing
         let new_path = self.ts.path.join("0").join(table_to_write.to_string());
         let mut table = Table::new(new_path, false)?;
-        let skipmap_len = self.mw.memtable.skipmap.len();
+        let skipmap_len = skipmap.len();
         table.write_table(
-            mem::replace(&mut self.mw.memtable.skipmap, SkipMap::new()).into_iter(),
+            skipmap.into_iter(),
             skipmap_len,
         )?;
-        self.mw.memtable.size = 0;
 
         self.ts.tables_per_level.as_mut().unwrap()[0] += 1;
         if self.ts.num_levels.unwrap() == 0 {
             self.ts.num_levels = Some(1);
         }
         self.commit_header()?;
-        self.mw.memtable.skipmap = SkipMap::new();
-
-        if self.ts.tables_per_level.unwrap()[0] == TABLES_UNTIL_COMPACTION {
-            self.compact()?;
-        }
+        self.compact()?;
 
         Ok(())
     }
@@ -364,16 +358,12 @@ impl Tree {
     }
 
     async fn restore_wal(&mut self) -> io::Result<()> {
-        self.mw.memtable.skipmap = self.mw.wal.get_wal_as_skipmap().await?;
-        if self.mw.memtable.skipmap.len() == 0 {
+        let skipmap = self.mw.wal.get_wal_as_skipmap().await?;
+        if skipmap.len() == 0 {
             return Ok(())
         }
-
-        self.write_skipmap_as_sstable()?;
-        // wal file persisted, truncate
-        self.mw.wal.wal_file.as_mut().unwrap().set_len(0).await?;
-
-        self.mw.wal.wal_file.as_mut().unwrap().sync_all().await?;
+        self.write_skipmap_as_sstable(skipmap)?;
+        self.mw.wal.reset().await?;
 
         Ok(())
     }
@@ -396,7 +386,8 @@ impl Tree {
         }).await?;
         
         if self.mw.memtable.needs_flush() {
-            self.write_skipmap_as_sstable()?;
+            let skipmap = self.mw.memtable.get_skipmap();
+            self.write_skipmap_as_sstable(skipmap)?;
             self.mw.memtable.reset();
             self.mw.wal.reset().await?;
         }
