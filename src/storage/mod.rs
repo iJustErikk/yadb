@@ -5,6 +5,8 @@ use std::io::{Read, Write};
 use std::mem;
 
 extern crate tokio;
+use tokio::sync::Mutex;
+
 use self::tokio::fs::File as TokioFile;
 use self::tokio::fs::OpenOptions as TokioOpenOptions;
 use std::io::{self};
@@ -20,7 +22,7 @@ mod memtable;
 use self::memtable::Memtable;
 
 mod wal;
-use self::wal::{Operation, WALEntry};
+use self::wal::{Operation, WALEntry, WALFile};
 
 mod errors;
 use self::errors::YAStorageError;
@@ -28,6 +30,7 @@ use self::errors::YAStorageError;
 // sstable- should I rename table?
 mod table;
 use self::table::{search_index, MergedTableIterators, Table};
+pub use self::memtable::MAX_MEMTABLE_SIZE;
 
 
 
@@ -42,29 +45,38 @@ use self::table::{search_index, MergedTableIterators, Table};
 // Magic vars (figure out how to make these configurable)
 // TODO: exposing these for integration test- should allow user to specify this in code
 pub const TABLES_UNTIL_COMPACTION: u8 = 3;
-pub const MAX_MEMTABLE_SIZE: usize = 1_000_000;
 // TODO: why does integration test make me have this
 pub fn main() {}
+struct TreeState {
+    num_levels: Option<usize>,
+    tables_per_level: Option<[u8; 5]>,
+    path: PathBuf
+}
+struct MemtableWal {
+    memtable: Memtable,
+    wal: WALFile
+}
 pub struct Tree {
     // let's start with 5 levels
     // this is a lot of space 111110 mb ~ 108.5 gb
-    num_levels: Option<usize>,
-    tables_per_level: Option<[u8; 5]>,
-    path: PathBuf,
-    memtable: Memtable,
-    wal_file: Option<TokioFile>,
+    ts: TreeState,
+    mw: MemtableWal
 }
 
 impl Tree {
     pub fn new(path: &str) -> Self {
         return Tree {
-            num_levels: None,
-            wal_file: None,
-            tables_per_level: None,
-            path: PathBuf::from(path),
-            memtable: Memtable {
-                skipmap: SkipMap::new(),
-                size: 0,
+            ts: TreeState {
+                num_levels: None,
+                tables_per_level: None,
+                path: PathBuf::from(path),
+            },
+            mw: MemtableWal {
+                memtable: Memtable {
+                    skipmap: SkipMap::new(),
+                    size: 0,
+                },
+                wal: WALFile::new()
             },
         };
     }
@@ -79,38 +91,41 @@ impl Tree {
         // TODO:
         // right now we just pass the error up to the user
         // we should probably send them a custom error with steps to fix
-        if !self.path.exists() {
-            fs::create_dir_all(&self.path)?;
+        if !self.ts.path.exists() {
+            fs::create_dir_all(&self.ts.path)?;
         }
-        if fs::read_dir(&self.path)?.next().is_none() {
+        if fs::read_dir(&self.ts.path)?.next().is_none() {
             let buffer = [0; 5];
-            self.tables_per_level = Some(buffer);
+            self.ts.tables_per_level = Some(buffer);
 
             // create is fine, no file to truncate
-            let mut header = File::create(self.path.clone().join("header"))?;
+            let mut header = File::create(self.ts.path.clone().join("header"))?;
             header.write_all(&buffer)?;
-            self.wal_file = Some(
+            self.mw.wal.wal_file = Some(
                 TokioOpenOptions::new()
                     .read(true)
                     .write(true)
                     .append(true)
                     .create(true)
-                    .open(self.path.clone().join("wal"))
+                    .open(self.ts.path.clone().join("wal"))
                     .await?,
             );
         } else {
             let mut buffer = [0; 5];
             // TODO: if this fails, alert the user with YAStorageError, missing header
-            let mut file = File::open(self.path.clone().join("header"))?;
+            let mut file = File::open(self.ts.path.clone().join("header"))?;
             // TODO: if this fails, alert the user with YAStorageError, corrupted header
             file.read_exact(&mut buffer)?;
-            self.tables_per_level = Some(buffer);
-            self.wal_file = Some(
+            self.ts.tables_per_level = Some(buffer);
+            if !self.ts.path.join("wal").exists() {
+                return Err(YAStorageError::MissingWAL);
+            }
+            self.mw.wal.wal_file = Some(
                 TokioOpenOptions::new()
                     .read(true)
                     .write(true)
                     .append(true)
-                    .open(self.path.clone().join("wal"))
+                    .open(self.ts.path.clone().join("wal"))
                     .await?,
             );
         }
@@ -118,18 +133,20 @@ impl Tree {
     }
 
     fn general_sanity_check(&mut self) -> Result<(), YAStorageError> {
+        // TODO: right now this compares FS state with header
+        // soon we'll have a manifest file that will reflect potentially uncommitted fs updates
         // any folder should be 0 - 4
         // any file in those folders should be numeric
         // # of sstables should match header
         // sstable names should be increasing (0 - # - 1)
         // header should agree with reality
         let mut num_levels: usize = 5;
-        while num_levels != 0 && self.tables_per_level.unwrap()[num_levels - 1] == 0 {
+        while num_levels != 0 && self.ts.tables_per_level.unwrap()[num_levels - 1] == 0 {
             num_levels -= 1;
         }
         // stuff is getting initialized in too many places...is there a better way to do this?
-        self.num_levels = Some(num_levels);
-        for entry_result in fs::read_dir(&self.path)? {
+        self.ts.num_levels = Some(num_levels);
+        for entry_result in fs::read_dir(&self.ts.path)? {
             let entry = entry_result?;
             if entry.file_type()?.is_dir() {
                 let level = match entry.file_name().into_string().unwrap().parse::<u8>() {
@@ -177,7 +194,7 @@ impl Tree {
                 // this must be equal to the range from 0 to # expected - 1
                 // must revisit
                 let expected: Vec<u8> =
-                    (0..self.tables_per_level.unwrap()[level as usize]).collect();
+                    (0..self.ts.tables_per_level.unwrap()[level as usize]).collect();
                 if actual != expected {
                     return Err(YAStorageError::SSTableMismatch { expected, actual })?;
                 }
@@ -200,7 +217,7 @@ impl Tree {
         key: &Vec<u8>,
     ) -> Result<Option<Vec<u8>>, YAStorageError> {
         let mut table: Table = Table::new(
-            self.path
+            self.ts.path
                 .clone()
                 .join(level.to_string())
                 .join(table.to_string()),
@@ -225,17 +242,17 @@ impl Tree {
         return Ok(None);
     }
     // TODO: these should take in slices, not vector refs
-    pub fn get(&self, key: &Vec<u8>) -> Result<Option<Vec<u8>>, YAStorageError> {
+    pub async fn get(&self, key: &Vec<u8>) -> Result<Option<Vec<u8>>, YAStorageError> {
         assert!(key.len() != 0);
-        if let Some(value) = self.memtable.skipmap.get(key) {
+        if let Some(value) = self.mw.memtable.skipmap.get(key) {
             let res = value.value().to_vec();
             if res.len() == 0 {
                 return Ok(None);
             }
             return Ok(Some(res));
         }
-        for level in 0..self.num_levels.unwrap() {
-            for sstable in (0..self.tables_per_level.unwrap()[level]).rev() {
+        for level in 0..self.ts.num_levels.unwrap() {
+            for sstable in (0..self.ts.tables_per_level.unwrap()[level]).rev() {
                 // TODO: if value vector is empty, this is a tombstone
                 if let Some(res) = self.search_table(level, sstable, &key)? {
                     // empty length vector is tombstone
@@ -252,55 +269,56 @@ impl Tree {
     }
 
     fn write_skipmap_as_sstable(&mut self) -> io::Result<()> {
-        let table_to_write = self.tables_per_level.unwrap()[0];
-        if !self.path.join("0").exists() {
-            fs::create_dir(self.path.join("0"))?;
+        let table_to_write = self.ts.tables_per_level.unwrap()[0];
+        if !self.ts.path.join("0").exists() {
+            fs::create_dir(self.ts.path.join("0"))?;
         }
-        let filename = self.tables_per_level.unwrap()[0];
+        let filename = self.ts.tables_per_level.unwrap()[0];
+
         // we better not be overwriting something
         // otherwise we are shooting ourselves in the foot
-        assert!(!self.path.join("0").join(filename.to_string()).exists());
+        assert!(!self.ts.path.join("0").join(filename.to_string()).exists());
 
         // TODO: begin write by creating table, then passing iterator for writing
-        let new_path = self.path.join("0").join(table_to_write.to_string());
+        let new_path = self.ts.path.join("0").join(table_to_write.to_string());
         let mut table = Table::new(new_path, false)?;
-        let skipmap_len = self.memtable.skipmap.len();
+        let skipmap_len = self.mw.memtable.skipmap.len();
         table.write_table(
-            mem::replace(&mut self.memtable.skipmap, SkipMap::new()).into_iter(),
+            mem::replace(&mut self.mw.memtable.skipmap, SkipMap::new()).into_iter(),
             skipmap_len,
         )?;
-        self.memtable.size = 0;
+        self.mw.memtable.size = 0;
 
-        self.tables_per_level.as_mut().unwrap()[0] += 1;
-        if self.num_levels.unwrap() == 0 {
-            self.num_levels = Some(1);
+        self.ts.tables_per_level.as_mut().unwrap()[0] += 1;
+        if self.ts.num_levels.unwrap() == 0 {
+            self.ts.num_levels = Some(1);
         }
         self.commit_header()?;
-        self.memtable.skipmap = SkipMap::new();
+        self.mw.memtable.skipmap = SkipMap::new();
 
-        if self.tables_per_level.unwrap()[0] == TABLES_UNTIL_COMPACTION {
+        if self.ts.tables_per_level.unwrap()[0] == TABLES_UNTIL_COMPACTION {
             self.compact()?;
         }
 
         Ok(())
     }
     fn commit_header(&mut self) -> io::Result<()> {
-        let mut header = File::create(self.path.join("header"))?;
-        header.write_all(&self.tables_per_level.unwrap())?;
+        let mut header = File::create(self.ts.path.join("header"))?;
+        header.write_all(&self.ts.tables_per_level.unwrap())?;
         header.sync_all()?;
         Ok(())
     }
 
     fn compact_level(&mut self, level: usize) -> io::Result<()> {
         assert!(level != 4);
-        let new_table = self.tables_per_level.unwrap()[level + 1];
+        let new_table = self.ts.tables_per_level.unwrap()[level + 1];
         let new_table_path = self
-            .path
+            .ts.path
             .join((level + 1).to_string())
             .join(new_table.to_string());
         let mut table = Table::new(new_table_path, false)?;
         let mut tables = (0..TABLES_UNTIL_COMPACTION)
-            .map(|x| Table::new(self.path.join(level.to_string()).join(x.to_string()), true))
+            .map(|x| Table::new(self.ts.path.join(level.to_string()).join(x.to_string()), true))
             .collect::<io::Result<Vec<Table>>>()?;
         // will at worst be a k tables * num keys overestimate
         // unique keys recalculated each compaction, so this will not worsen
@@ -320,16 +338,16 @@ impl Tree {
         // for compaction, there is a new failure point: between writing the table and deleting the old level
         // if this fails, on init, the database will recompact the old files and duplicate the data
         // this does not impact correctness (latest table would be read first), but space performance and write performance (compaction happens sooner)
-        self.tables_per_level.as_mut().unwrap()[level] = 0;
-        if self.tables_per_level.unwrap()[level + 1] == 0 {
-            self.num_levels = Some(self.num_levels.unwrap() + 1);
+        self.ts.tables_per_level.as_mut().unwrap()[level] = 0;
+        if self.ts.tables_per_level.unwrap()[level + 1] == 0 {
+            self.ts.num_levels = Some(self.ts.num_levels.unwrap() + 1);
         }
 
         // TODO: unwrapping makes a copy if you do not do as_mut
         // investigate if there are any other bugs causes by me not doing this
         // is there a good way to avoid this?
-        self.tables_per_level.as_mut().unwrap()[level + 1] += 1;
-        fs::remove_dir_all(self.path.join(level.to_string()))?;
+        self.ts.tables_per_level.as_mut().unwrap()[level + 1] += 1;
+        fs::remove_dir_all(self.ts.path.join(level.to_string()))?;
 
         self.commit_header()?;
 
@@ -338,63 +356,24 @@ impl Tree {
     fn compact(&mut self) -> io::Result<()> {
         let mut level = 0;
         // this may fail between compactions, so we need to check if we need to compact on startup
-        while self.tables_per_level.unwrap()[level] == TABLES_UNTIL_COMPACTION {
+        while self.ts.tables_per_level.unwrap()[level] == TABLES_UNTIL_COMPACTION {
             self.compact_level(level)?;
             level += 1;
         }
         Ok(())
     }
 
-    async fn append_to_wal(&mut self, entry: WALEntry) -> io::Result<()> {
-        entry
-            .serialize(&mut (self.wal_file.as_mut().unwrap()))
-            .await?;
-        // wal metadata should not change, so sync_data is fine to use, instead of sync_all/fsync
-        self.wal_file.as_mut().unwrap().sync_data().await?;
-        Ok(())
-    }
-
     async fn restore_wal(&mut self) -> io::Result<()> {
-        let mut entries = Vec::new();
-        assert!(self.path.join("wal").exists());
-        loop {
-            match WALEntry::deserialize(&mut (self.wal_file.as_mut().unwrap())).await {
-                Ok(entry) => entries.push(entry),
-                Err(e) => {
-                    if e.kind() == io::ErrorKind::UnexpectedEof {
-                        break;
-                    } else {
-                        return Err(e);
-                    }
-                }
-            }
+        self.mw.memtable.skipmap = self.mw.wal.get_wal_as_skipmap().await?;
+        if self.mw.memtable.skipmap.len() == 0 {
+            return Ok(())
         }
-        if entries.len() == 0 {
-            return Ok(());
-        }
-
-        let skipmap = SkipMap::new();
-
-        for entry in entries {
-            match entry.operation {
-                Operation::PUT => {
-                    skipmap.insert(entry.key, entry.value);
-                }
-                // empty vector is tombstone
-                Operation::DELETE => {
-                    skipmap.insert(entry.key, Vec::new());
-                }
-                _ => {}
-            }
-        }
-
-        self.memtable.skipmap = skipmap;
 
         self.write_skipmap_as_sstable()?;
         // wal file persisted, truncate
-        self.wal_file.as_mut().unwrap().set_len(0).await?;
+        self.mw.wal.wal_file.as_mut().unwrap().set_len(0).await?;
 
-        self.wal_file.as_mut().unwrap().sync_all().await?;
+        self.mw.wal.wal_file.as_mut().unwrap().sync_all().await?;
 
         Ok(())
     }
@@ -406,39 +385,20 @@ impl Tree {
         key: &Vec<u8>,
         value: &Vec<u8>,
     ) -> Result<(), YAStorageError> {
-        let old_size = if self.memtable.skipmap.contains_key(key) {
-            key.len() + self.memtable.skipmap.get(key).unwrap().value().len()
-        } else {
-            0
-        };
-        let new_size = key.len() + value.len();
-        // split these up, as adding the difference causes overflow on deletes
-        self.memtable.size += new_size;
-        self.memtable.size -= old_size;
-        // TODO: I could remove the copies one of two ways:
-        // - take ownership of kv (will the end user want this?)
-        // - work with references (this will put the effort on the end user)
-        // right now, copying sounds best as it avoids making the user keep the kv in memory or having to copy into this function
-        if operation == Operation::PUT {
-            self.memtable.skipmap.insert(key.to_vec(), value.to_vec());
-        } else if operation == Operation::DELETE {
-            self.memtable.skipmap.insert(key.to_vec(), Vec::new());
-        }
+        // TODO: update insert_or_delete when more operations are supported
+        assert!(operation == Operation::PUT  || operation == Operation::DELETE);
+        self.mw.memtable.insert_or_delete(key, value, operation == Operation::PUT);
 
-        self.append_to_wal(WALEntry {
+        self.mw.wal.append_to_wal(WALEntry {
             operation,
             key: key.to_vec(),
             value: value.to_vec(),
         }).await?;
-        // TODO: no magic values
-        // add config setting
-
-        if self.memtable.size > MAX_MEMTABLE_SIZE {
+        
+        if self.mw.memtable.needs_flush() {
             self.write_skipmap_as_sstable()?;
-            self.memtable.skipmap = SkipMap::new();
-            // wal persisted, truncate now
-            self.wal_file.as_mut().unwrap().set_len(0).await.unwrap();
-            self.wal_file.as_mut().unwrap().sync_all().await.unwrap();
+            self.mw.memtable.reset();
+            self.mw.wal.reset().await?;
         }
         Ok(())
     }

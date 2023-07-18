@@ -15,6 +15,7 @@ pub enum YAStorageError {
     LevelTooLarge { level: u8 },
     SSTableMismatch { expected: Vec<u8>, actual: Vec<u8> },
     CorruptWalEntry,
+    MissingWAL,
 }
 
 impl YAStorageError {
@@ -48,6 +49,7 @@ impl fmt::Display for YAStorageError {
             ),
             YAStorageError::CorruptWalEntry => write!(f, "Corrupt Wal Entry"),
             YAStorageError::IOError { error } => write!(f, "IO Error: {}", error.to_string()),
+            YAStorageError::MissingWAL => write!(f, "Missing WAL"),
         }
     }
 }

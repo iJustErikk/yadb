@@ -16,7 +16,7 @@ name = "storage"
 path = "src/storage/mod.rs"
 
 [dependencies]
-tokio = { version = "1.29.1", features = ["io-util", "fs", "macros", "rt-multi-thread"] }
+tokio = { version = "1.29.1", features = ["io-util", "fs", "macros", "rt-multi-thread", "sync"] }
 log = "0.4.17"
 simplelog = "0.12.1"
 crossbeam-skiplist = "0.1.1"

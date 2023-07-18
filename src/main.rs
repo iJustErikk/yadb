@@ -52,7 +52,7 @@ async fn process_command(command: &[String], storage: &mut Tree) -> String {
         }
         Some("get") if command.len() == 2 => {
             let key = command[1].as_bytes().to_vec();
-            match storage.get(&key).unwrap() {
+            match storage.get(&key).await.unwrap() {
                 Some(value) => String::from_utf8(value.to_vec()).unwrap() + "\n",
                 None => "Key not found\n".to_string(),
             }
@@ -96,7 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for stream in listener.incoming() {
         let stream = stream.unwrap();
         info!("client at: {}", stream.peer_addr().unwrap());
-        handle_client(stream, &mut db);
+        handle_client(stream, &mut db).await;
     }
 
     Ok(())

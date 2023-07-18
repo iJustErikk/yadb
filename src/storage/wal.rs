@@ -1,5 +1,8 @@
 extern crate tokio;
+use crossbeam_skiplist::SkipMap;
+
 use self::tokio::io::{self, AsyncReadExt, AsyncWriteExt};
+use self::tokio::fs::File;
 use std::convert::TryFrom;
 pub struct WALEntry {
     // see below, these should be hidden
@@ -68,5 +71,63 @@ impl TryFrom<u8> for Operation {
             2 => Ok(Operation::DELETE),
             _ => Err(()),
         }
+    }
+}
+
+pub struct WALFile {
+    pub wal_file: Option<File>,
+}
+
+impl WALFile {
+    pub fn new() -> Self {
+        return WALFile {wal_file: None}
+    }
+
+    pub async fn append_to_wal(&mut self, entry: WALEntry) -> io::Result<()> {
+        entry
+            .serialize(&mut (self.wal_file.as_mut().unwrap()))
+            .await?;
+        // wal metadata should not change, so sync_data is fine to use, instead of sync_all/fsync
+        self.wal_file.as_mut().unwrap().sync_data().await?;
+        Ok(())
+    }
+
+    pub async fn reset(&mut self) -> io::Result<()> {
+            // wal persisted, truncate now
+            self.wal_file.as_mut().unwrap().set_len(0).await?;
+            self.wal_file.as_mut().unwrap().sync_all().await?;
+            Ok(())
+    }
+
+    pub async fn get_wal_as_skipmap(&mut self) -> io::Result<SkipMap<Vec<u8>, Vec<u8>>> {
+        let mut entries = Vec::new();
+        loop {
+            match WALEntry::deserialize(&mut (self.wal_file.as_mut().unwrap())).await {
+                Ok(entry) => entries.push(entry),
+                Err(e) => {
+                    if e.kind() == io::ErrorKind::UnexpectedEof {
+                        break;
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        let skipmap = SkipMap::new();
+
+        for entry in entries {
+            match entry.operation {
+                Operation::PUT => {
+                    skipmap.insert(entry.key, entry.value);
+                }
+                // empty vector is tombstone
+                Operation::DELETE => {
+                    skipmap.insert(entry.key, Vec::new());
+                }
+                _ => {}
+            }
+        }
+        return Ok(skipmap);
     }
 }
