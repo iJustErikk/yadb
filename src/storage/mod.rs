@@ -4,33 +4,28 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::sync::Arc;
 
-extern crate tokio;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-use self::tokio::fs::OpenOptions as TokioOpenOptions;
+use tokio::fs::OpenOptions as TokioOpenOptions;
 use std::io::{self};
 use std::path::PathBuf;
 
-extern crate crossbeam_skiplist;
-use self::crossbeam_skiplist::SkipMap;
-extern crate cuckoofilter;
-extern crate fastmurmur3;
-extern crate tempfile;
+use crossbeam_skiplist::SkipMap;
 
 mod memtable;
-use self::memtable::Memtable;
+use memtable::Memtable;
 
 mod wal;
-use self::wal::{Operation, WALEntry, WALFile};
+use wal::{Operation, WALEntry, WALFile};
 
 mod errors;
-use self::errors::YAStorageError;
+use errors::YAStorageError;
 
 // sstable- should I rename table?
 mod table;
-use self::table::{search_index, MergedTableIterators, Table};
-pub use self::memtable::MAX_MEMTABLE_SIZE;
+use table::{search_index, MergedTableIterators, Table};
+pub use memtable::MAX_MEMTABLE_SIZE;
 
 
 
@@ -453,8 +448,8 @@ impl Tree {
 // TODO: version header/wal/sstable to provide backward compatibility
 #[cfg(test)]
 mod init_tests {
-    use self::fs::remove_file;
-    use self::tempfile::tempdir;
+    use fs::remove_file;
+    use tempfile::tempdir;
     use std::error::Error;
     use std::fs::{create_dir, remove_dir};
     use std::io::Read;

@@ -1,4 +1,4 @@
-use self::fs::File;
+use fs::File;
 use std::cell::RefCell;
 use std::fs;
 use std::hash::BuildHasher;
@@ -10,11 +10,9 @@ use std::io::SeekFrom;
 use std::iter::Peekable;
 use std::path::PathBuf;
 
-extern crate cuckoofilter;
-use self::cuckoofilter::CuckooFilter;
+use cuckoofilter::CuckooFilter;
 
-extern crate byteorder;
-use self::byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::collections::BinaryHeap;
 use std::io::Read;
 use std::io::Write;

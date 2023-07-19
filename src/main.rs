@@ -1,5 +1,3 @@
-extern crate log;
-extern crate simplelog;
 
 use log::{info, warn, LevelFilter};
 use simplelog::{ColorChoice, CombinedLogger, Config, TermLogger, TerminalMode, WriteLogger};

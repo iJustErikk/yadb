@@ -1,5 +1,4 @@
-extern crate crossbeam_skiplist;
-use self::crossbeam_skiplist::SkipMap;
+use crossbeam_skiplist::SkipMap;
 // TODO: we 'reach' into here often. we should expose functions
 
 

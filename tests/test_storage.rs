@@ -1,10 +1,8 @@
 // integration tests for storage engine (kv, garbage collection, bloom filter, iterators (soon))
 // see src/storage.rs for unit tests
 // TODO: test db recovery better (how to inject failures?)
-extern crate tempfile;
-use self::tempfile::tempdir;
+use tempfile::tempdir;
 use std::error::Error;
-extern crate yadb;
 use yadb::storage::*;
 
 fn str_to_byte_buf(s: &String) -> Vec<u8> {

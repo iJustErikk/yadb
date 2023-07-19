@@ -1,8 +1,7 @@
-extern crate tokio;
 use crossbeam_skiplist::SkipMap;
 
-use self::tokio::io::{self, AsyncReadExt, AsyncWriteExt};
-use self::tokio::fs::File;
+use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
+use tokio::fs::File;
 use std::convert::TryFrom;
 pub struct WALEntry {
     // see below, these should be hidden
