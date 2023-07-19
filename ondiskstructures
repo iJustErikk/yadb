@@ -13,3 +13,4 @@ The index is placed after the datablocks to simplify compaction implementation.
 This seems similar to the rocksdb implementation. 
 
 wal:
+1 byte operation 4 byte key length [key] 4 byte value length [value] [endline] for each walentry
