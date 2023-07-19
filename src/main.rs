@@ -10,7 +10,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 
 pub mod storage;
-use storage::{Tree};
+use storage::Tree;
 
 async fn handle_client(mut stream: TcpStream, storage: &mut Tree) {
     loop {
@@ -43,23 +43,25 @@ fn read_client_command(stream: &mut TcpStream) -> Result<Vec<String>, IoError> {
 }
 
 async fn process_command(command: &[String], storage: &mut Tree) -> String {
+    // TODO: revisit this to handle errors better
     match command.get(0).map(String::as_str) {
         Some("put") if command.len() == 3 => {
             let key = command[1].as_bytes().to_vec();
             let value = command[2].as_bytes().to_vec();
-            storage.put(&key, &value).await.unwrap();
+            storage.put(&key, &value).await.unwrap().unwrap();
             "Success\n".to_string()
         }
         Some("get") if command.len() == 2 => {
             let key = command[1].as_bytes().to_vec();
             match storage.get(&key).await.unwrap() {
-                Some(value) => String::from_utf8(value.to_vec()).unwrap() + "\n",
-                None => "Key not found\n".to_string(),
+                Ok(Some(value)) => String::from_utf8(value.to_vec()).unwrap() + "\n",
+                Ok(None) => "Key not found\n".to_string(),
+                Err(_) => "Get failed.".to_string()
             }
         }
         Some("delete") if command.len() == 2 => {
             let key = command[1].as_bytes().to_vec();
-            storage.delete(&key).await.unwrap();
+            storage.delete(&key).await.unwrap().unwrap();
             "Success\n".to_string()
         }
         _ => "Invalid command\n".to_string(),
