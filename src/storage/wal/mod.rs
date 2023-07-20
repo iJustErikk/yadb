@@ -2,7 +2,11 @@ use crossbeam_skiplist::SkipMap;
 
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::fs::File;
+use tokio::time::Duration;
 use std::convert::TryFrom;
+
+mod batch_writer;
+use batch_writer::AsyncBufferedWriter;
 pub struct WALEntry {
     // see below, these should be hidden
     pub operation: Operation,
@@ -74,12 +78,14 @@ impl TryFrom<u8> for Operation {
 }
 
 pub struct WALFile {
-    pub wal_file: Option<File>,
+    pub wal_file: Option<File>
 }
+const MAX_BYTES: u64 = 4096;
+const TIME_LIMIT: Duration = Duration::from_millis(10);
 
 impl WALFile {
     pub fn new() -> Self {
-        return WALFile {wal_file: None}
+        return WALFile { wal_file: None }
     }
 
     pub async fn append_to_wal(&mut self, entry: WALEntry) -> io::Result<()> {

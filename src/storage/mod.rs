@@ -29,6 +29,7 @@ pub use memtable::MAX_MEMTABLE_SIZE;
 
 
 
+
 // look into: no copy network -> fs, I believe kafka does something like this
 // TODO: go through with checklist to make sure the database can fail at any point during wal replay, compaction or memtable flush
 
@@ -392,18 +393,19 @@ impl Tree {
         assert!(operation == Operation::PUT  || operation == Operation::DELETE);
         mw.memtable.insert_or_delete(key, value, operation == Operation::PUT);
 
-        mw.wal.append_to_wal(WALEntry {
-            operation,
-            key: key.to_vec(),
-            value: value.to_vec(),
-        }).await?;
-        
         if mw.memtable.needs_flush() {
             let skipmap = mw.memtable.get_skipmap();
             Self::write_skipmap_as_sstable(skipmap, ts)?;
             mw.memtable.reset();
             mw.wal.reset().await?;
+        } else {
+            mw.wal.append_to_wal(WALEntry {
+                operation,
+                key: key.to_vec(),
+                value: value.to_vec(),
+            }).await?;
         }
+        
         Ok(())
     }
 
