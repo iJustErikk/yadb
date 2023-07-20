@@ -20,6 +20,4 @@ Run `./setup.sh` to get started.
 
 Run `cargo test` to run tests.
 
-Try 33/33/33 r/w/d 5000 x 2 (30000 operations) key benchmark with `./run_storage.sh`
-
-Profile that benchmark with `./profile_storage.sh`
+Re-adding performance benchmarks once concurrent improvements roll in.
