@@ -4,7 +4,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
 use tokio::fs::OpenOptions as TokioOpenOptions;
@@ -55,19 +55,19 @@ struct MemtableWal {
 pub struct Tree {
     // let's start with 5 levels
     // this is a lot of space 111110 mb ~ 108.5 gb
-    ts: Arc<Mutex<TreeState>>,
-    mw: Arc<Mutex<MemtableWal>>
+    ts: Arc<RwLock<TreeState>>,
+    mw: Arc<RwLock<MemtableWal>>
 }
 
 impl Tree {
     pub fn new(path: &str) -> Self {
         return Tree {
-            ts: Arc::new(Mutex::new(TreeState {
+            ts: Arc::new(RwLock::new(TreeState {
                 num_levels: None,
                 tables_per_level: None,
                 path: PathBuf::from(path),
             })),
-            mw: Arc::new(Mutex::new(MemtableWal {
+            mw: Arc::new(RwLock::new(MemtableWal {
                 memtable: Memtable {
                     skipmap: SkipMap::new(),
                     size: 0,
@@ -78,14 +78,14 @@ impl Tree {
     }
 
     pub async fn init(&mut self) -> Result<(), YAStorageError> {
-        // get writer lock here
+        // get writer lock here (not concurrent, but required by rust)
         // uncontended and only on startup
-        // required by rust- note that any "drilling" is due to mutex actually owning the state
+        // required by rust- note that any "drilling" is due to RwLock actually owning the state
         // not sure of the best way to get around this
         
         self.init_folder().await?;
-        let mut ts = self.ts.lock().await;
-        let mut mw = self.mw.lock().await;
+        let mut ts = self.ts.write().await;
+        let mut mw = self.mw.write().await;
         self.general_sanity_check(&mut ts)?;
         self.restore_wal(&mut ts, &mut mw).await?;
         Ok(())
@@ -93,8 +93,8 @@ impl Tree {
     async fn init_folder(&mut self) -> Result<(), YAStorageError> {
         // acquire lock here so we can preserve init_folder tests
         // this is better than the alternative of stealing shared state just to pass it back in
-        let mut ts = self.ts.lock().await;
-        let mut mw = self.mw.lock().await;
+        let mut ts = self.ts.write().await;
+        let mut mw = self.mw.write().await;
         // TODO: revisit error handling here
         if !ts.path.exists() {
             fs::create_dir_all(&ts.path)?;
@@ -254,8 +254,8 @@ impl Tree {
         // TODO: figure out clone
         let key = key.clone();
         tokio::spawn(async move {
-            let ts = ts_clone.lock().await;
-            let mw = mw_clone.lock().await;
+            let ts = ts_clone.read().await;
+            let mw = mw_clone.read().await;
             if let Some(value) = mw.memtable.skipmap.get(&key) {
                 let res = value.value().to_vec();
                 if res.len() == 0 {
@@ -419,8 +419,8 @@ impl Tree {
         let key = key.clone();
         let value = value.clone();
         tokio::spawn(async move {
-            let mut ts = ts_clone.lock().await;
-            let mut mw = mw_clone.lock().await;
+            let mut ts = ts_clone.write().await;
+            let mut mw = mw_clone.write().await;
             Self::add_walentry(Operation::PUT, &key, &value, &mut ts, &mut mw).await?;
             Ok(())
         })
@@ -432,8 +432,8 @@ impl Tree {
         let mw_clone = Arc::clone(&self.mw);
         let key = key.clone();
         tokio::spawn(async move {
-            let mut ts = ts_clone.lock().await;
-            let mut mw = mw_clone.lock().await;
+            let mut ts = ts_clone.write().await;
+            let mut mw = mw_clone.write().await;
             // empty value is tombstone
             Self::add_walentry(Operation::DELETE, &key, &Vec::new(), &mut ts, &mut mw).await?;
             Ok(())
