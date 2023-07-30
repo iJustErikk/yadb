@@ -1,5 +1,5 @@
 # YAdb
-yet another database
+yet another database ![Test Status](https://github.com/github/docs/actions/workflows/cargo-test.yml/badge.svg)
 
 making a db. with ~~rocksdb~~ ~~rust~~ ~~go/cockroachdb's pebble.~~ actually going back to rust, writing my own storage engine.
 
