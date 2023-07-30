@@ -40,6 +40,7 @@ metrics to implement:
 - wal replay total bytes
 - # sstables
 - disk usage
+- write buffer queue length
 - avg/median sstable size
 - overhead (lsm size) / (number of all bytes of keys, values, not including lengths)
 - read ios / read operation
