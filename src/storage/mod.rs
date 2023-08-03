@@ -83,18 +83,25 @@ impl Tree {
         // required by rust- note that any "drilling" is due to RwLock actually owning the state
         // not sure of the best way to get around this
         
-        self.init_folder().await?;
+        let just_init = self.init_folder().await?;
         let mut ts = self.ts.write().await;
         let mut mw = self.mw.write().await;
         self.general_sanity_check(&mut ts)?;
-        self.restore_wal(&mut ts, &mut mw).await?;
+        if !just_init {
+            self.restore_wal(&mut ts, &mut mw).await?;
+        }
+        mw.wal.start_writing(TokioOpenOptions::new()
+        .write(true)
+        .open(ts.path.clone().join("wal"))
+        .await?);
         Ok(())
     }
-    async fn init_folder(&mut self) -> Result<(), YAStorageError> {
+    // TODO: is this function doing too much or is the name not good enough?
+    // returns true iff first initialization
+    async fn init_folder(&mut self) -> Result<bool, YAStorageError> {
         // acquire lock here so we can preserve init_folder tests
         // this is better than the alternative of stealing shared state just to pass it back in
         let mut ts = self.ts.write().await;
-        let mut mw = self.mw.write().await;
         // TODO: revisit error handling here
         if !ts.path.exists() {
             fs::create_dir_all(&ts.path)?;
@@ -106,15 +113,13 @@ impl Tree {
             // create is fine, no file to truncate
             let mut header = File::create(ts.path.clone().join("header"))?;
             header.write_all(&buffer)?;
-            mw.wal.wal_file = Some(
-                TokioOpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .append(true)
-                    .create(true)
-                    .open(ts.path.clone().join("wal"))
-                    .await?,
-            );
+
+            TokioOpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(ts.path.clone().join("wal"))
+                .await?;
+            return Ok(true);
         } else {
             let mut buffer = [0; 5];
             // TODO: if this fails, alert the user with YAStorageError, missing header
@@ -125,19 +130,13 @@ impl Tree {
             if !ts.path.join("wal").exists() {
                 return Err(YAStorageError::MissingWAL);
             }
-            mw.wal.wal_file = Some(
-                TokioOpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .append(true)
-                    .open(ts.path.clone().join("wal"))
-                    .await?,
-            );
+            return Ok(false);
         }
-        Ok(())
     }
 
     fn general_sanity_check(&self, ts: &mut TreeState) -> Result<(), YAStorageError> {
+        // TODO: header file will be replaced with WAL (which will probably be garbage collected into header)
+        // at very least, the header file format will be updated
         // TODO: right now this compares FS state with header
         // soon we'll have a manifest file that will reflect potentially uncommitted fs updates
         // any folder should be 0 - 4
@@ -211,6 +210,25 @@ impl Tree {
                 })?;
             }
         }
+        Ok(())
+    }
+
+
+    // PRECONDITION: wal_file exists, this is only ever run after first startup
+    async fn restore_wal(&self, ts: &mut TreeState, mw: &mut MemtableWal) -> io::Result<()> {
+        let exi = ts.path.join("wal").exists();
+        let mut wal_file =
+            TokioOpenOptions::new()
+                .write(true)
+                .read(true)
+                .open(ts.path.clone().join("wal"))
+                .await?;
+        let skipmap = mw.wal.get_wal_as_skipmap(&mut wal_file).await?;
+        if skipmap.len() == 0 {
+            return Ok(())
+        }
+        Self::write_skipmap_as_sstable(skipmap, ts)?;
+        mw.wal.reset(&mut Some(&mut wal_file)).await?;
 
         Ok(())
     }
@@ -370,16 +388,6 @@ impl Tree {
         Ok(())
     }
 
-    async fn restore_wal(&self, ts: &mut TreeState, mw: &mut MemtableWal) -> io::Result<()> {
-        let skipmap = mw.wal.get_wal_as_skipmap().await?;
-        if skipmap.len() == 0 {
-            return Ok(())
-        }
-        Self::write_skipmap_as_sstable(skipmap, ts)?;
-        mw.wal.reset().await?;
-
-        Ok(())
-    }
 
     // TODO: both the append and fsync are too slow.
     async fn add_walentry(
@@ -397,7 +405,7 @@ impl Tree {
             let skipmap = mw.memtable.get_skipmap();
             Self::write_skipmap_as_sstable(skipmap, ts)?;
             mw.memtable.reset();
-            mw.wal.reset().await?;
+            mw.wal.reset(&mut None).await?;
         } else {
             mw.wal.append_to_wal(WALEntry {
                 operation,

@@ -26,6 +26,19 @@ impl WALEntry {
         Ok(())
     }
 
+    // pub fn serialize(&self) -> Vec<u8> {
+    //     let mut buffer = Vec::new();
+    
+    //     buffer.push(self.operation as u8);
+    //     buffer.extend_from_slice(&(self.key.len() as u64).to_le_bytes());
+    //     buffer.extend(&self.key);
+    //     buffer.extend_from_slice(&(self.value.len() as u64).to_le_bytes());
+    //     buffer.extend(&self.value);
+    //     buffer.push(b'\n');
+    
+    //     buffer
+    // }
+
     // this will fail if entry becomes corrupted or the write failed midway
     // for either, let's make the assumption that it happened on the last walentry
     // read to the end of the file
@@ -78,17 +91,23 @@ impl TryFrom<u8> for Operation {
 }
 
 pub struct WALFile {
-    pub wal_file: Option<File>
+    pub wal_file: Option<File>,
+    pub writer: Option<AsyncBufferedWriter>
 }
-const MAX_BYTES: u64 = 4096;
+const MAX_BYTES: usize = 4096;
 const TIME_LIMIT: Duration = Duration::from_millis(10);
 
 impl WALFile {
     pub fn new() -> Self {
-        return WALFile { wal_file: None }
+        return WALFile { wal_file: None, writer: None }
+    }
+
+    pub fn start_writing(&mut self, file: File) {
+        self.wal_file = Some(file);
     }
 
     pub async fn append_to_wal(&mut self, entry: WALEntry) -> io::Result<()> {
+        // self.writer.as_mut().unwrap().write(entry.serialize())
         entry
             .serialize(&mut (self.wal_file.as_mut().unwrap()))
             .await?;
@@ -96,18 +115,25 @@ impl WALFile {
         self.wal_file.as_mut().unwrap().sync_data().await?;
         Ok(())
     }
-
-    pub async fn reset(&mut self) -> io::Result<()> {
+    // this is temporary ugliness- this will be gone soon
+    pub async fn reset(&self, wal_file: &mut Option<&mut File>) -> io::Result<()> {
+            if wal_file.is_none() {
+                return Ok(());
+            }
             // wal persisted, truncate now
-            self.wal_file.as_mut().unwrap().set_len(0).await?;
-            self.wal_file.as_mut().unwrap().sync_all().await?;
+            let wal_file = &mut **wal_file.as_mut().unwrap();
+            wal_file.set_len(0).await?;
+            wal_file.sync_all().await?;
             Ok(())
     }
 
-    pub async fn get_wal_as_skipmap(&mut self) -> io::Result<SkipMap<Vec<u8>, Vec<u8>>> {
+    pub async fn get_wal_as_skipmap(&self, wal_file: &mut File) -> io::Result<SkipMap<Vec<u8>, Vec<u8>>> {
+        // whatever file this uses should get consumed, so it should get passed in
+        // caller should call initialization function that resets for next run
+        // that should also setup the batch writer
         let mut entries = Vec::new();
         loop {
-            match WALEntry::deserialize(&mut (self.wal_file.as_mut().unwrap())).await {
+            match WALEntry::deserialize(wal_file).await {
                 Ok(entry) => entries.push(entry),
                 Err(e) => {
                     if e.kind() == io::ErrorKind::UnexpectedEof {

@@ -1,8 +1,9 @@
 Implementing all of these is time consuming. Need to prioritize so I can implement distributed kv store (almost ready)/sql database (need db iterator, performance enhancements)
 RIGHT NOW:
 
-- pull lsmtree into its own class
 - finish concurrent update
+- pull lsmtree into its own class to eliminate remaining coupling and "prop drilling"
+- replace header and guarantee FS agnostic durability with FS WAL manifest
 - extract magic variables to config (in cargo.toml)
 
 TODO:

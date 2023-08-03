@@ -1,7 +1,6 @@
 use crossbeam_skiplist::SkipMap;
 // TODO: we 'reach' into here often. we should expose functions
 
-
 pub const MAX_MEMTABLE_SIZE: usize = 1_000_000;
 pub struct Memtable {
     // TODO: should not be pub :)

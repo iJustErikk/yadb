@@ -21,6 +21,7 @@ use std::io::Write;
 // also provides API for a couple of different types of iterators to write table.
 // TODO: implementation has tons of magic values. is there a better way to do this?
 // I think the best thing to do is isolate seek logic + offset io to internal functions
+// TODO: this needs to be asyncified, but there are lots of issues with that (async iterators, ord in heaps with async)
 pub struct Table {
     file: File,
     total_data_bytes: Option<u64>,

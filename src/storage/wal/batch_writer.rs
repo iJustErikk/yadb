@@ -9,7 +9,6 @@ use tokio::io::AsyncSeekExt;
 
 pub struct AsyncBufferedWriter {
     channel: mpsc::Sender<WriterCommand>,
-    flush_limit: usize,
 }
 
 enum WriterCommand {
@@ -25,7 +24,6 @@ impl AsyncBufferedWriter {
 
         let async_buffered_writer = AsyncBufferedWriter {
             channel: tx,
-            flush_limit,
         };
 
         task::spawn(async move {
@@ -70,12 +68,15 @@ impl AsyncBufferedWriter {
                             // does reset need to drop write lock (no it cant. it does not need to encourage any concurrency and it needs to ensure future writes do not go ahead of the reset- they might be lost)
 
                             file.write_all(&data_to_flush).await.unwrap();
-                            file.sync_all().await.unwrap();
+                            file.sync_data().await.unwrap();
 
                             for notifier in to_notify.drain(..) {
                                 notifier.send(()).unwrap();
                             }
                             file.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+                            // wal persisted, truncate now
+                            file.set_len(0).await.unwrap();
+                            file.sync_all().await.unwrap();
 
                             // let reset requester know the wal_file cursor has been reset
                             notifier.send(()).unwrap();
@@ -87,10 +88,10 @@ impl AsyncBufferedWriter {
                             data_to_flush.extend(&data);
                             to_notify.push(notifier);
 
-                            if data_to_flush.len() >= async_buffered_writer.flush_limit {
+                            if data_to_flush.len() >= flush_limit {
                                 // TODO: would data_to_flush this copy paste into closure- but async closures are unstable?
                                 file.write_all(&data).await.unwrap();
-                                file.sync_all().await.unwrap();
+                                file.sync_data().await.unwrap();
                 
                                 for notifier in to_notify.drain(..) {
                                     notifier.send(()).unwrap();
@@ -103,7 +104,7 @@ impl AsyncBufferedWriter {
                     _ = interval.tick() => {
                         if !data_to_flush.is_empty() {
                             file.write_all(&data_to_flush).await.unwrap();
-                            file.sync_all().await.unwrap();
+                            file.sync_data().await.unwrap();
             
                             for notifier in to_notify.drain(..) {
                                 notifier.send(()).unwrap();
@@ -120,7 +121,7 @@ impl AsyncBufferedWriter {
         async_buffered_writer
     }
 
-    async fn write(&self, data: Vec<u8>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn write(&self, data: Vec<u8>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (tx, rx) = oneshot::channel();
         self.channel.send(WriterCommand::Write(data, tx)).await.unwrap();
         // NOTE: if writer task responds before or after we await, nothing is lost
