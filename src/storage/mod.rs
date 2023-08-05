@@ -216,7 +216,6 @@ impl Tree {
 
     // PRECONDITION: wal_file exists, this is only ever run after first startup
     async fn restore_wal(&self, ts: &mut TreeState, mw: &mut MemtableWal) -> io::Result<()> {
-        let exi = ts.path.join("wal").exists();
         let mut wal_file =
             TokioOpenOptions::new()
                 .write(true)
@@ -228,7 +227,8 @@ impl Tree {
             return Ok(())
         }
         Self::write_skipmap_as_sstable(skipmap, ts)?;
-        mw.wal.reset(&mut Some(&mut wal_file)).await?;
+        wal_file.set_len(0).await?;
+        wal_file.sync_all().await?;
 
         Ok(())
     }
@@ -389,30 +389,41 @@ impl Tree {
     }
 
 
-    // TODO: both the append and fsync are too slow.
     async fn add_walentry(
         operation: Operation,
         key: &Vec<u8>,
         value: &Vec<u8>,
-        ts: &mut TreeState, 
-        mw: &mut MemtableWal
+        ts: Arc<RwLock<TreeState>>, 
+        mw: Arc<RwLock<MemtableWal>>
     ) -> Result<(), YAStorageError> {
         // TODO: update insert_or_delete when more operations are supported
         assert!(operation == Operation::PUT  || operation == Operation::DELETE);
+
+        let mut ts = ts.write().await;
+        let mut mw = mw.write().await;
+
         mw.memtable.insert_or_delete(key, value, operation == Operation::PUT);
 
         if mw.memtable.needs_flush() {
             let skipmap = mw.memtable.get_skipmap();
-            Self::write_skipmap_as_sstable(skipmap, ts)?;
+            Self::write_skipmap_as_sstable(skipmap, &mut ts)?;
             mw.memtable.reset();
-            mw.wal.reset(&mut None).await?;
+            mw.wal.reset().await?;
+            return Ok(());
         } else {
-            mw.wal.append_to_wal(WALEntry {
+            let fut = mw.wal.append_to_wal(WALEntry {
                 operation,
                 key: key.to_vec(),
                 value: value.to_vec(),
-            }).await?;
+            });
+            // we no longer care about the state, just that the write has gone through
+            // there is more analysis in batch_writer
+            // release the lock to allow for concurrency
+            std::mem::drop(mw);
+            std::mem::drop(ts);
+            fut.await;
         }
+
         
         Ok(())
     }
@@ -421,29 +432,23 @@ impl Tree {
         assert!(key.len() != 0);
         // empty length value is tombstone
         assert!(value.len() != 0);
-        let ts_clone = Arc::clone(&self.ts);
-        let mw_clone = Arc::clone(&self.mw);
-        // TODO: revisit this and delete's clone to see if we could reduce cloning
-        let key = key.clone();
-        let value = value.clone();
-        tokio::spawn(async move {
-            let mut ts = ts_clone.write().await;
-            let mut mw = mw_clone.write().await;
-            Self::add_walentry(Operation::PUT, &key, &value, &mut ts, &mut mw).await?;
-            Ok(())
-        })
+        return self.start_write(key, value, Operation::PUT);
     }
 
     pub fn delete(&mut self, key: &Vec<u8>) -> JoinHandle<Result<(), YAStorageError>> {
         assert!(key.len() != 0);
-        let ts_clone = Arc::clone(&self.ts);
-        let mw_clone = Arc::clone(&self.mw);
+        return self.start_write(key, &Vec::new(), Operation::DELETE);
+    }
+
+    pub fn start_write(&mut self, key: &Vec<u8>, value: &Vec<u8>, op: Operation) -> JoinHandle<Result<(), YAStorageError>>  {
+
         let key = key.clone();
+        let value = value.clone();
+        let ts = Arc::clone(&self.ts);
+        let mw = Arc::clone(&self.mw);
         tokio::spawn(async move {
-            let mut ts = ts_clone.write().await;
-            let mut mw = mw_clone.write().await;
             // empty value is tombstone
-            Self::add_walentry(Operation::DELETE, &key, &Vec::new(), &mut ts, &mut mw).await?;
+            Self::add_walentry(op, &key, &value, ts, mw).await?;
             Ok(())
         })
     }

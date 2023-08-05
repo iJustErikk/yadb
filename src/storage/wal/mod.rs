@@ -2,6 +2,7 @@ use crossbeam_skiplist::SkipMap;
 
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::fs::File;
+use tokio::sync::oneshot::Receiver;
 use tokio::time::Duration;
 use std::convert::TryFrom;
 
@@ -16,28 +17,15 @@ pub struct WALEntry {
 
 impl WALEntry {
     // TODO: wal buffer means this can become private
-    pub async fn serialize<W: io::AsyncWrite + Unpin>(&self, writer: &mut W) -> io::Result<()> {
-        writer.write_u8(self.operation as u8).await?;
-        writer.write_u64_le(self.key.len() as u64).await?;
-        writer.write_all(&self.key).await?;
-        writer.write_u64_le(self.value.len() as u64).await?;
-        writer.write_all(&self.value).await?;
-        writer.write_all(b"\n").await?;
-        Ok(())
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut res = Vec::new();
+        res.push(self.operation as u8);
+        res.extend((self.key.len() as u64).to_le_bytes());
+        res.extend(&self.key);
+        res.extend((self.value.len() as u64).to_le_bytes());
+        res.extend(&self.value);
+        return res;
     }
-
-    // pub fn serialize(&self) -> Vec<u8> {
-    //     let mut buffer = Vec::new();
-    
-    //     buffer.push(self.operation as u8);
-    //     buffer.extend_from_slice(&(self.key.len() as u64).to_le_bytes());
-    //     buffer.extend(&self.key);
-    //     buffer.extend_from_slice(&(self.value.len() as u64).to_le_bytes());
-    //     buffer.extend(&self.value);
-    //     buffer.push(b'\n');
-    
-    //     buffer
-    // }
 
     // this will fail if entry becomes corrupted or the write failed midway
     // for either, let's make the assumption that it happened on the last walentry
@@ -53,8 +41,6 @@ impl WALEntry {
         let value_len = reader.read_u64_le().await? as usize;
         let mut value = vec![0; value_len];
         reader.read_exact(&mut value).await?;
-        let mut newline = [0; 1];
-        reader.read_exact(&mut newline).await?;
 
         // if newline[0] != b'\n' {
         //     return Err(YAStorageError::CorruptWalEntry)?;
@@ -91,7 +77,6 @@ impl TryFrom<u8> for Operation {
 }
 
 pub struct WALFile {
-    pub wal_file: Option<File>,
     pub writer: Option<AsyncBufferedWriter>
 }
 const MAX_BYTES: usize = 4096;
@@ -99,32 +84,21 @@ const TIME_LIMIT: Duration = Duration::from_millis(10);
 
 impl WALFile {
     pub fn new() -> Self {
-        return WALFile { wal_file: None, writer: None }
+        return WALFile { writer: None }
     }
 
     pub fn start_writing(&mut self, file: File) {
-        self.wal_file = Some(file);
+        self.writer = Some(AsyncBufferedWriter::new(MAX_BYTES, TIME_LIMIT, file));
     }
 
-    pub async fn append_to_wal(&mut self, entry: WALEntry) -> io::Result<()> {
-        // self.writer.as_mut().unwrap().write(entry.serialize())
-        entry
-            .serialize(&mut (self.wal_file.as_mut().unwrap()))
-            .await?;
-        // wal metadata should not change, so sync_data is fine to use, instead of sync_all/fsync
-        self.wal_file.as_mut().unwrap().sync_data().await?;
-        Ok(())
+    pub fn append_to_wal(&mut self, entry: WALEntry) -> Receiver<()> {
+        // await while holding lock rn, soon lets drop the lock and then await
+        // TODO: need to understand how options jive with borrowing/ownership better
+        return self.writer.as_mut().unwrap().write(entry.serialize());
     }
-    // this is temporary ugliness- this will be gone soon
-    pub async fn reset(&self, wal_file: &mut Option<&mut File>) -> io::Result<()> {
-            if wal_file.is_none() {
-                return Ok(());
-            }
-            // wal persisted, truncate now
-            let wal_file = &mut **wal_file.as_mut().unwrap();
-            wal_file.set_len(0).await?;
-            wal_file.sync_all().await?;
-            Ok(())
+    pub async fn reset(&mut self) -> io::Result<()> {
+        self.writer.as_mut().unwrap().reset().await.unwrap();
+        Ok(())
     }
 
     pub async fn get_wal_as_skipmap(&self, wal_file: &mut File) -> io::Result<SkipMap<Vec<u8>, Vec<u8>>> {
@@ -161,4 +135,5 @@ impl WALFile {
         }
         return Ok(skipmap);
     }
+    
 }

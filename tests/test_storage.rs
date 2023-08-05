@@ -4,6 +4,8 @@
 use tempfile::tempdir;
 use std::error::Error;
 use yadb::storage::*;
+use futures::stream::FuturesUnordered;
+use futures::stream::StreamExt;
 
 fn str_to_byte_buf(s: &String) -> Vec<u8> {
     return s.as_bytes().to_vec();
@@ -65,7 +67,37 @@ async fn filter_false_negative() -> Result<(), Box<dyn Error>> {
     }
     Ok(())
 }
+// benchmarks
+#[tokio::test]
+async fn write_test_async() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+    tree.init().await.expect("Failed to init folder");
+    let mut futures = FuturesUnordered::new();
 
+    for i in 0..5000 {
+        let key = i.to_string();
+        let value: Vec<u8> = vec![0; 10];
+        futures.push(tree.put(&(str_to_byte_buf(&key)), &value));
+    }
+
+    while let Some(result) = futures.next().await {
+        result??;
+    }
+    Ok(())
+}
+#[tokio::test]
+async fn write_test_sync() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+    tree.init().await.expect("Failed to init folder");
+    for i in 0..5000 {
+        let key = i.to_string();
+        let value: Vec<u8> = vec![0; 10];
+        tree.put(&(str_to_byte_buf(&key)), &value).await??;
+    }
+    Ok(())
+}
 #[tokio::test]
 async fn gpd_wal() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
