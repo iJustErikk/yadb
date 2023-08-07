@@ -27,9 +27,6 @@ mod table;
 use table::{search_index, MergedTableIterators, Table};
 pub use memtable::MAX_MEMTABLE_SIZE;
 
-
-
-
 // look into: no copy network -> fs, I believe kafka does something like this
 // TODO: go through with checklist to make sure the database can fail at any point during wal replay, compaction or memtable flush
 
@@ -223,9 +220,11 @@ impl Tree {
                 .open(ts.path.clone().join("wal"))
                 .await?;
         let skipmap = mw.wal.get_wal_as_skipmap(&mut wal_file).await?;
+
         if skipmap.len() == 0 {
             return Ok(())
         }
+
         Self::write_skipmap_as_sstable(skipmap, ts)?;
         wal_file.set_len(0).await?;
         wal_file.sync_all().await?;
@@ -421,7 +420,7 @@ impl Tree {
             // release the lock to allow for concurrency
             std::mem::drop(mw);
             std::mem::drop(ts);
-            fut.await;
+            fut.await.unwrap();
         }
 
         

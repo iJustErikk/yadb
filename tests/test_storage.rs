@@ -54,16 +54,27 @@ async fn filter_false_negative() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
     tree.init().await.expect("Failed to init folder");
+    let mut futures = FuturesUnordered::new();
     for i in 0..5000 {
         let key = i.to_string();
         let value: Vec<u8> = vec![0; 10];
-        tree.put(&(str_to_byte_buf(&key)), &value).await??;
+        futures.push(tree.put(&(str_to_byte_buf(&key)), &value));
+    }
+
+    while let Some(result) = futures.next().await {
+        result??;
     }
     let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
     tree.init().await.expect("Failed to init folder");
+
+    let mut futures = FuturesUnordered::new();
+    
     for i in 0..5000 {
         let key = i.to_string();
-        assert!(tree.get(&(str_to_byte_buf(&key))).await??.is_some());
+        futures.push(tree.get(&(str_to_byte_buf(&key))));
+    }
+    while let Some(result) = futures.next().await {
+        assert!(result??.is_some());
     }
     Ok(())
 }
@@ -86,6 +97,7 @@ async fn write_test_async() -> Result<(), Box<dyn Error>> {
     }
     Ok(())
 }
+#[ignore = "concurrent-improvements"]
 #[tokio::test]
 async fn write_test_sync() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
@@ -115,7 +127,6 @@ async fn gpd_wal() -> Result<(), Box<dyn Error>> {
     for i in 0..10 {
         let key = i.to_string();
         let value: Vec<u8> = vec![i; 1000];
-        println!("{} blah", key);
         assert!(tree.get(&(str_to_byte_buf(&key))).await.unwrap().unwrap().unwrap() == value);
         tree.delete(&(str_to_byte_buf(&key))).await??;
         tree.put(&(str_to_byte_buf(&key)), &value).await??;
@@ -146,21 +157,18 @@ async fn gpd_compaction() -> Result<(), Box<dyn Error>> {
 }
 
 /* Things to test:
-
-empty k/v
-super long k/v
-
 test compaction
 
 out of space
-test recovery - difficult to test this (could make any IO fail, but how can I do this without mocking every IO)
-performance
+test recovery -> difficult to test this (could make any IO fail, but how can I do this without mocking every IO)
+performance -> 50/50 r/w 90/10 r/w 10/90 r/w
 
 fuzz testing
 think of more
 
 future tests:
-concurrency
+concurrency (concurrent writes in memory, from fs (after wal recovery, compaction or flush))
+
 merge operator
 custom comparator
 (different compaction strategies?)

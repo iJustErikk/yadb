@@ -4,7 +4,8 @@ use tokio::fs::File;
 use tokio::time::{Duration, self};
 use tokio::io::AsyncWriteExt;
 use tokio::task;
-use tokio::io::AsyncSeekExt;
+use tokio::io::{AsyncSeekExt, SeekFrom};
+
 
 
 pub struct AsyncBufferedWriter {
@@ -77,7 +78,7 @@ impl AsyncBufferedWriter {
                             for notifier in to_notify.drain(..) {
                                 notifier.send(()).unwrap();
                             }
-                            file.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+                            file.seek(SeekFrom::Start(0)).await.unwrap();
                             // wal persisted, truncate now
                             file.set_len(0).await.unwrap();
                             file.sync_all().await.unwrap();
@@ -94,7 +95,7 @@ impl AsyncBufferedWriter {
 
                             if data_to_flush.len() >= flush_limit {
                                 // TODO: would data_to_flush this copy paste into closure- but async closures are unstable?
-                                file.write_all(&data).await.unwrap();
+                                file.write_all(&data_to_flush).await.unwrap();
                                 file.sync_data().await.unwrap();
                 
                                 for notifier in to_notify.drain(..) {
@@ -102,6 +103,7 @@ impl AsyncBufferedWriter {
                                 }
                 
                                 data_to_flush.clear();
+                                
                             }
                         }
                     },
@@ -109,6 +111,7 @@ impl AsyncBufferedWriter {
                         if !data_to_flush.is_empty() {
                             file.write_all(&data_to_flush).await.unwrap();
                             file.sync_data().await.unwrap();
+                            
             
                             for notifier in to_notify.drain(..) {
                                 notifier.send(()).unwrap();

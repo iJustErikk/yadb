@@ -39,7 +39,7 @@ verify this on startup so user cannot corrupt db from providing mismatching sett
 metrics to implement:
 - wal replays
 - wal replay total bytes
-- # sstables
+- num sstables
 - disk usage
 - write buffer queue length
 - avg/median sstable size
@@ -53,3 +53,5 @@ metrics to implement:
 - lock contention times (for r/w, for memtable/fs)
 - io time
 - compression time
+- wal log flushes, ratio of wal log flushes that are duration or accumulated
+- time between wal flushes

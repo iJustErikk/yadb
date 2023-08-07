@@ -1,6 +1,6 @@
 use crossbeam_skiplist::SkipMap;
 
-use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{self, AsyncReadExt};
 use tokio::fs::File;
 use tokio::sync::oneshot::Receiver;
 use tokio::time::Duration;
@@ -100,7 +100,14 @@ impl WALFile {
         self.writer.as_mut().unwrap().reset().await.unwrap();
         Ok(())
     }
-
+    
+    // why are we using a skipmap?
+    // it allows us to mutate values while keeping the data sorted
+    // could use a hashmap + sort
+    // that MIGHT be quicker
+    // but this is certainly easier
+    // and this is not slow
+    // so that will probably not get looked into
     pub async fn get_wal_as_skipmap(&self, wal_file: &mut File) -> io::Result<SkipMap<Vec<u8>, Vec<u8>>> {
         // whatever file this uses should get consumed, so it should get passed in
         // caller should call initialization function that resets for next run
