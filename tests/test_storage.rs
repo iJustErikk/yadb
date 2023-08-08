@@ -49,6 +49,7 @@ async fn gpd_in_memory() -> Result<(), Box<dyn Error>> {
     assert!(tree.get(&vec![0]).await??.is_none());
     Ok(())
 }
+
 #[tokio::test]
 async fn filter_false_negative() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
@@ -97,19 +98,6 @@ async fn write_test_async() -> Result<(), Box<dyn Error>> {
     }
     Ok(())
 }
-#[ignore = "concurrent-improvements"]
-#[tokio::test]
-async fn write_test_sync() -> Result<(), Box<dyn Error>> {
-    let dir = tempdir()?;
-    let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
-    tree.init().await.expect("Failed to init folder");
-    for i in 0..5000 {
-        let key = i.to_string();
-        let value: Vec<u8> = vec![0; 10];
-        tree.put(&(str_to_byte_buf(&key)), &value).await??;
-    }
-    Ok(())
-}
 #[tokio::test]
 async fn gpd_wal() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
@@ -155,6 +143,43 @@ async fn gpd_compaction() -> Result<(), Box<dyn Error>> {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn concurrent_writes_causing_flush() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+    tree.init().await.expect("Failed to init folder");
+    let mut futures = FuturesUnordered::new();
+    for i in 0..1000 {
+        let key = i.to_string();
+        let value: Vec<u8> = vec![0; 1000];
+        futures.push(tree.put(&(str_to_byte_buf(&key)), &value));
+
+    while let Some(result) = futures.next().await {
+        result??;
+    }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_writes_causing_compaction() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+    tree.init().await.expect("Failed to init folder");
+    let mut futures = FuturesUnordered::new();
+    for i in 0..3000 {
+        let key = i.to_string();
+        let value: Vec<u8> = vec![0; 1000];
+        futures.push(tree.put(&(str_to_byte_buf(&key)), &value));
+
+    while let Some(result) = futures.next().await {
+        result??;
+    }
+    }
+    Ok(())
+}
+
 
 /* Things to test:
 test compaction

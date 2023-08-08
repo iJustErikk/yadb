@@ -1,9 +1,13 @@
+use std::error::Error;
 // lsm based storage engine
 // level compaction whenever level hits 10 sstables
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::sync::Arc;
 
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
+use tempfile::tempdir;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
@@ -38,8 +42,6 @@ pub use memtable::MAX_MEMTABLE_SIZE;
 // Magic vars (figure out how to make these configurable)
 // TODO: exposing these for integration test- should allow user to specify this in code
 pub const TABLES_UNTIL_COMPACTION: u8 = 3;
-// TODO: why does integration test make me have this
-pub fn main() {}
 struct TreeState {
     num_levels: Option<usize>,
     tables_per_level: Option<[u8; 5]>,
@@ -256,6 +258,7 @@ impl Tree {
             return Ok(None);
         }
         let mut block = table.get_datablock(byte_offset.unwrap())?;
+        // TODO: could use binary search here
         for (cantidate_key, value) in block.entries.iter_mut() {
             if cantidate_key == key {
                 return Ok(Some(std::mem::replace(value, Vec::new())));
@@ -453,13 +456,25 @@ impl Tree {
     }
 }
 
-// compression/data integrity: use gzip or allow user to choose compression algorithm
+#[tokio::main]
+// for benchmarking only
+async fn main()  -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+    tree.init().await.expect("Failed to init folder");
+    let mut futures = FuturesUnordered::new();
+    for i in 0..10000 {
+        let key = i.to_string();
+        let value: Vec<u8> = vec![0; 1000];
+        futures.push(tree.put(&((&key).as_bytes().to_vec()), &value));
 
-// unit tests
-// (try to) test individual functions
-// need to research mocking
-// TODO: wrap any writing to header/wal/sstable so code/tests stay consistent
-// TODO: version header/wal/sstable to provide backward compatibility
+    while let Some(result) = futures.next().await {
+        result??;
+    }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod init_tests {
     use fs::remove_file;

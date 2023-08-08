@@ -86,8 +86,8 @@ impl AsyncBufferedWriter {
                             // let reset requester know the wal_file cursor has been reset
                             notifier.send(()).unwrap();
 
+                            // println!("shutdown");
                             data_to_flush.clear();
-                            break;
                         }
                         WriterCommand::Write(data, notifier) => {
                             data_to_flush.extend(&data);
@@ -103,6 +103,7 @@ impl AsyncBufferedWriter {
                                 }
                 
                                 data_to_flush.clear();
+                                // println!("acc flush");
                                 
                             }
                         }
@@ -118,6 +119,7 @@ impl AsyncBufferedWriter {
                             }
             
                             data_to_flush.clear();
+                            // println!("interval flush");
                         }
                     },
                     
@@ -131,6 +133,7 @@ impl AsyncBufferedWriter {
     pub fn write(&self, data: Vec<u8>) -> Receiver<()> {
         let (tx, rx) = oneshot::channel();
         self.channel.send(WriterCommand::Write(data, tx)).unwrap();
+        
         // NOTE: if writer task responds before or after we await, nothing is lost
         // so, no race condition.
         return rx;

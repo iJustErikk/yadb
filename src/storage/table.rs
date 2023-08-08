@@ -10,7 +10,7 @@ use std::io::SeekFrom;
 use std::iter::Peekable;
 use std::path::PathBuf;
 
-use cuckoofilter::CuckooFilter;
+use bloomfilter::Bloom;
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::collections::BinaryHeap;
@@ -115,13 +115,17 @@ impl Table {
         let mut data_section: Vec<u8> = Vec::new();
         let mut current_block: Vec<u8> = Vec::new();
         // needs to be roughly uniform, deterministic and fast -> not the default hasher
+        // siphash is used anyway in this crate...is it uniform?
         // interesting read: https://www.eecs.harvard.edu/~michaelm/postscripts/tr-02-05.pdf
         // TODO: look into hash DOS attacks
-
-        let mut cf: CuckooFilter<FastMurmur3Hasher> = CuckooFilter::with_capacity(num_unique_keys);
+        // switched from cuckoofilters back to bloom filters since I don't know how to handle eviction
+        let r: f64 = 0.03;
+        // use regular bloom filters
+        let mut filter = Bloom::new_for_fp_rate(num_unique_keys, r);
         let mut unique_keys: u64 = 0;
         for (key, value) in it {
-            cf.add(&key).unwrap();
+            // println!("{unique_keys} {num_unique_keys}");
+            filter.set(&key);
             if current_block.is_empty() {
                 index.write_u64::<LittleEndian>(key.len() as u64)?;
                 index.extend(&key);
@@ -149,10 +153,10 @@ impl Table {
         self.file.write_all(&data_section)?;
         self.file.write_u64::<LittleEndian>(index.len() as u64)?;
         self.file.write_all(&index)?;
-        let ex_filter = cf.export();
+        let ex_filter = filter.bit_vec();
         self.file
-            .write_u64::<LittleEndian>(ex_filter.length as u64)?;
-        self.file.write_all(&ex_filter.values)?;
+            .write_u64::<LittleEndian>(ex_filter.len() as u64)?;
+        self.file.write_all(&ex_filter.to_bytes())?;
         // footer: 8 bytes for index offset, 8 for filter offset, 8 for unique keys
         // TODO: magic value
         let filter_offset = index.len() + data_section.len() + 8;

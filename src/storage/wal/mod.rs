@@ -142,5 +142,5 @@ impl WALFile {
         }
         return Ok(skipmap);
     }
-    
 }
+
