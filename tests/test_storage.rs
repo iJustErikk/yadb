@@ -191,8 +191,8 @@ enum DBResult {
     Get(Result<Result<Option<Vec<u8>>, yadb::storage::YAStorageError>, JoinError>)
 }
 
-
-// original benchmark, 50000 gp * 2 (200K), 100 bytes, 200K tot ops / 2.5 seconds -> 80000 ops/second
+// orig benchmark 5k gpd 10 bytes 160 ops / second
+// 50000 gp * 2 (200K), 100 bytes, 200K tot ops / 2.5 seconds -> 80000 ops/second
 // 20 million bytes in 2.5 seconds -> 8 million bytes or 7.62MB/second
 // should wrap this functionality into heavily parameterized benchmark generator
 // it'll return the FuturesUnordered at hand
@@ -200,7 +200,7 @@ enum DBResult {
 // RNG will be seeded with 42 to ensure repro (tokio + codespaces server sources of bias)
 // very good results for now
 #[tokio::test]
-async fn twenty_bench() -> Result<(), Box<dyn Error>> {
+async fn split_bench() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
     tree.init().await.expect("Failed to init folder");

@@ -20,4 +20,4 @@ Run `./setup.sh` to get started.
 
 Run `cargo test` to run tests.
 
-Run `cargo `
+Run `cargo test split_bench` to run current benchmark.
