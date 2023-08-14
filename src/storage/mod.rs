@@ -24,7 +24,7 @@ mod wal;
 use wal::{Operation, WALEntry, WALFile};
 
 mod errors;
-use errors::YAStorageError;
+pub use errors::YAStorageError;
 
 // sstable- should I rename table?
 mod table;
@@ -57,6 +57,8 @@ pub struct Tree {
     ts: Arc<RwLock<TreeState>>,
     mw: Arc<RwLock<MemtableWal>>
 }
+
+
 
 impl Tree {
     pub fn new(path: &str) -> Self {

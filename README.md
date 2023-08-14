@@ -20,4 +20,4 @@ Run `./setup.sh` to get started.
 
 Run `cargo test` to run tests.
 
-Re-adding performance benchmarks once concurrent improvements roll in.
+Run `cargo `
