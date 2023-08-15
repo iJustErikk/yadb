@@ -11,9 +11,8 @@ path = "src/main.rs"
 name = "client"
 path = "src/client.rs"
 
-[[bin]]
-name = "storage"
-path = "src/storage/mod.rs"
+[profile.bench]
+debug = true
 
 [dependencies]
 tokio = { version = "1.29.1", features = ["io-util", "fs", "macros", "rt-multi-thread", "sync", "time"] }
@@ -24,7 +23,8 @@ byteorder = "1.4.3"
 fastmurmur3 = "0.1.2"
 bloomfilter = "1.0.9"
 
-# these are only used in unit/integration tests
-tempfile = "3.6.0"
+# only used in unit/integratiojn tests
+[dev-dependencies]
 futures = "0.3.28"
+tempfile = "3.6.0"
 rand = { version = "0.8.5", features = ["small_rng", "alloc"] }

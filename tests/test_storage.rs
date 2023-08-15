@@ -204,7 +204,7 @@ fn generate_benchmark(mut tree: Tree, rounds: i32, gpd_weights: [i32; 3], key_ra
     // TODO: there has to be a cleaner way to do this
     let key_range = Uniform::from(key_range[0]..key_range[1]);
     let gpd_ind_dist = WeightedIndex::new(&gpd_weights).unwrap();
-    for i in 0..rounds {
+    for _ in 0..rounds {
         let key = key_range.sample(&mut rng).to_string();
         let value: Vec<u8> = vec![0; val_bytes];
         // sample from gpd distribution

@@ -8,7 +8,7 @@ if ! which cargo > /dev/null; then
 fi
 
 # avoid perf issue
-echo "kernel.perf_event_paranoid = 1" | sudo tee -a /etc/sysctl.conf
+echo "kernel.perf_event_paranoid = -1" | sudo tee -a /etc/sysctl.conf
 sudo sysctl -p
 
 cargo install flamegraph

@@ -21,3 +21,5 @@ Run `./setup.sh` to get started.
 Run `cargo test` to run tests.
 
 Run `cargo test split_bench` to run current benchmark.
+
+Run `cargo flamegraph --test test_storage -- split_bench` to profile current benchmark.
