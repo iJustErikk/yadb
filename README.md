@@ -3,7 +3,7 @@ yet another database ![Test Status](https://github.com/iJustErikk/yadb/actions/w
 
 making a db. with ~~rocksdb~~ ~~rust~~ ~~go/cockroachdb's pebble.~~ actually going back to rust, writing my own storage engine.
 
-Update: the storage engine now provides a minimum functionality for implementing a database (minus iterators for sql-like dbs). need to improve performance (see concurrent design analysis). Putting this project on pause for a bit.
+Update: the storage engine now provides a minimum functionality for implementing a database (minus iterators for sql-like dbs). Improved performance via batching WAL IO. Currently working on improving the API (don't hide copies, make them do it), adding caching to improve read performance and adding iterators (need to consider transactions first).
 
 Motivation: I wish to better my system and data engineering skills. Data intensity will only increase. 
 

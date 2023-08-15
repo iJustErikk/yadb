@@ -1,37 +1,30 @@
-Implementing all of these is time consuming. Need to prioritize so I can implement distributed kv store (almost ready)/sql database (need db iterator, performance enhancements)
 RIGHT NOW:
 
-- finish concurrent update
+- implement filter/index/block cache (need to undo mem::replace for datablocks)
+- extract magic variables to config (maybe cargo.toml or just pass in settings map)
 - pull lsmtree into its own class to eliminate remaining coupling and "prop drilling"
-- replace header and guarantee FS agnostic durability with FS WAL manifest
-- extract magic variables to config (in cargo.toml)
+- implement either mvcc or serializable snapshot isolation for transactions
+- implement iterator (when do iterators become invalid? should I go about a similar scheme to rocksdb (where iterators block operations that invalidate them)? how would I implement that?)
 
 TODO:
-- utilize bloom filters on reads (these seem to be nondeterministic, need to debug)
-- implement iterator (when do iterators become invalid? should I go about a similar scheme to rocksdb (where iterators block operations that invalidate them)? how would I implement that?)
-- create/find benchmarks
-- implement filter/index/block cache (need to undo mem::replace for datablocks)
-- implement either mvcc or serializable snapshot isolation for transactions
 
 TODO LATER (NEEDS PRIORITIZATION):
-- verify db durability + implement FS level manifest WAL to handle multiple/non atomic FS operations (varies OS to OS, everything should be atomic if POSIX compliant)
+- verify (prove) db durability + implement FS level manifest WAL to handle multiple/non atomic FS operations (varies OS to OS, everything should be atomic if POSIX compliant)
 - eliminate needless copies (is this done)
 - implement custom merge operator
-- extend errors so they are more actionable
-- implement multithreaded compaction
-- write fuzzer
+- extend errors so they are more actionable (most mean something went horribly wrong)
+- implement multithreaded compaction (send read IOs at once if possible, compact in background)
+- write fuzzer (should be easier and can base off of load tests)
 - abstract away compaction logic (for potentially more compactions)
-- abstract away touching any files
-- implement multithreaded writes/reads
 - rate limit compaction (static, additive/multiplicative increase, multiplicative decrease)
 - support tables (tuples for values)
-- compression/checksums (GZIP)
+- compression/checksums (GZIP or similar) (need to think of how this affects flushing a block)
 - allow user to customize compression/checksums
-- more stuff for dbs (merkle tree differences, configuring WAL log so it can hook up to replication logs like Raft(right now serde is abstracted, so all that needs to be done is wrap so user can choose where writes go))
+- more stuff for dbs (merkle tree differences for anti-entropy mechanisms, configuring WAL log so it can hook up to replication logs like Raft(right now serde is abstracted, so all that needs to be done is wrap so user can choose where writes go))
 - more verification (both just in time and defensive checks) (JIT: read what you write, def: check blocks/checksums on startup and every some AEON (what is reasonable? 8 hours? this should be limited in throughput like compaction)
-- monitoring + metrics (see below)
+- monitoring + metrics  (rocksdb calls these stats) (see below)
 - multiget/multiput (see rocksdb)
-- error correcting codes
+- error correction (RAID support, ECC, https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1233620/ -> DNA does not have SIMPLE error correcting codes)
 - compile db settings (which algorithms they choose, persistence settings). 
 verify this on startup so user cannot corrupt db from providing mismatching settings (usually this would be some migration) note: this too can get corrupted. maybe this should be stored in its own table? maybe that is why sql dbms typically store their data in their own tabels
 - migrations (avoid as long as possible- we do not have active users)

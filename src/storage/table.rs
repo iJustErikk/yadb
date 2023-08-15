@@ -229,7 +229,7 @@ impl DataBlock {
     }
 }
 
-// index grows linearly with sstable data
+// index grows linearly with sstable keys/data
 // index has a key for each ~4kb block
 // if we have 1tb of data
 // then we have ~256m keys in the index
