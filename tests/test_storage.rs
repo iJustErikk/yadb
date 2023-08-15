@@ -1,8 +1,14 @@
 use futures::FutureExt;
+use rand::SeedableRng;
+use rand::distributions::Uniform;
+use rand::distributions::WeightedIndex;
+use rand::prelude::Distribution;
+use rand::rngs::SmallRng;
 // integration tests for storage engine (kv, garbage collection, bloom filter, iterators (soon))
 // see src/storage.rs for unit tests
 // TODO: test db recovery better (how to inject failures?)
 use tempfile::tempdir;
+use std::future::Future;
 use tokio::task::JoinError;
 use std::error::Error;
 use yadb::storage::*;
@@ -191,37 +197,61 @@ enum DBResult {
     Get(Result<Result<Option<Vec<u8>>, yadb::storage::YAStorageError>, JoinError>)
 }
 
+
+fn generate_benchmark(mut tree: Tree, rounds: i32, gpd_weights: [i32; 3], key_range: [i32; 2], val_bytes: usize) -> FuturesUnordered<std::pin::Pin<Box<dyn Future<Output = DBResult> + Send>>> {
+    let futures = FuturesUnordered::new();
+    let mut rng = SmallRng::seed_from_u64(42);
+    // TODO: there has to be a cleaner way to do this
+    let key_range = Uniform::from(key_range[0]..key_range[1]);
+    let gpd_ind_dist = WeightedIndex::new(&gpd_weights).unwrap();
+    for i in 0..rounds {
+        let key = key_range.sample(&mut rng).to_string();
+        let value: Vec<u8> = vec![0; val_bytes];
+        // sample from gpd distribution
+        let gpd_type = gpd_ind_dist.sample(&mut rng);
+        match gpd_type {
+            0 => {
+                futures.push(
+                    tree.put(&(str_to_byte_buf(&key)), &value).map(DBResult::Empty)
+                .boxed());
+            },
+            1 => {
+
+            futures.push(
+                tree.get(&(str_to_byte_buf(&key))).map(DBResult::Get)
+            .boxed());
+            },
+            2 => {
+
+                futures.push(
+                    tree.delete(&(str_to_byte_buf(&key))).map(DBResult::Empty)
+                .boxed());
+            }
+            // it should not sample anything else
+            _ => todo!()
+        }
+        
+
+    } 
+    return futures;
+}
+
 // orig benchmark 5k gpd 10 bytes 160 ops / second
+// recent benchmark:
 // 50000 gp * 2 (200K), 100 bytes, 200K tot ops / 2.5 seconds -> 80000 ops/second
-// 20 million bytes in 2.5 seconds -> 8 million bytes or 7.62MB/second
-// should wrap this functionality into heavily parameterized benchmark generator
-// it'll return the FuturesUnordered at hand
-// it should be given probabilities for each GPD to sim dif workloads
-// RNG will be seeded with 42 to ensure repro (tokio + codespaces server sources of bias)
-// very good results for now
+// 20 million bytes in 2.5 seconds -> 8 million bytes or 7.62MB/second (if we 10x the value size, we nearly get to nearly 20 MB/second)
+// current (using new pseudorandom generator):
+// 50000 rounds gp probs of 50% each, 0-50k key range, 100 byte value -> slow, need to investigate
+// interesting: why not specify expected collision rate rather than key range?
+// then we can compute the key range and we have a better knob
+// uniform distribution
 #[tokio::test]
 async fn split_bench() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
     tree.init().await.expect("Failed to init folder");
-    let mut futures = FuturesUnordered::new();
-    for i in 0..50000 {
-        let key = i.to_string();
-        let value: Vec<u8> = vec![0; 100];
-        futures.push(
-            tree.put(&(str_to_byte_buf(&key)), &value).map(DBResult::Empty)
-        .boxed());
-        
-        // deletes decrease the amount of WAL writes/flushes/compactions
-        // they are also very fast and have minimal WAL footprint
-        // futures.push(
-        //     tree.delete(&(str_to_byte_buf(&key))).map(DBResult::Empty)
-        // .boxed());
-
-        futures.push(
-            tree.get(&(str_to_byte_buf(&key))).map(DBResult::Get)
-        .boxed());
-    }    
+    let mut futures = generate_benchmark(tree, 50000, [50, 50, 0], [0, 50000], 100);
+       
 
     while let Some(result) = futures.next().await {
         match result {

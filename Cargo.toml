@@ -27,3 +27,4 @@ bloomfilter = "1.0.9"
 # these are only used in unit/integration tests
 tempfile = "3.6.0"
 futures = "0.3.28"
+rand = { version = "0.8.5", features = ["small_rng", "alloc"] }
