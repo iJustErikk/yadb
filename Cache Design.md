@@ -17,6 +17,14 @@ Data is never mutated, it is only deleted or written. We pull entries into the c
 
 Since we do not cache table stats on startup, we'll need to get the index for that table, then count the entries or store the number of keys before the number of bytes for the offset. I'd much rather this than having to think about statistics for now. 
 
+Compaction (right now, level compaction) can only happen if there are no executing reads. So, there will never be a read running on invalid data.
+
 To summarize:
 
 Create a LSMCache class. It will have 3 lru caches. It will expose functions for getting a key given some File (adding/evicting as needed) as well as an invalidation function taking the table names, blocknames to delete from the cahces. The invalidation function will peek these keys and delete them if they are in the cache. The function to calculate the keys to be invalidated will exist in LSMTree and it will incur 10 random read ios concurrently to get the number of blocks. 
+
+Just realized:
+
+LSMCache must be async friendly. I want to be able to have many concurrent read IOs. I'll go for an explicit locked design as it is faster and simpler than a channel based approach.
+
+For cache gets, contend on the lock. Check if the key is in the cache. If so, return that. If not, check if others are waiting on that key. If so, join them. If not, start that list and send a read IO. Cannot use a RW lock, as even when checking the cache we might want to join the waiting list.
