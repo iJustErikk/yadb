@@ -1,5 +1,16 @@
 use fs::File;
+use tokio::sync::oneshot;
+use tokio::sync::oneshot::Sender;
+use std::fmt::Debug;
+use std::collections::HashMap;
+use std::future::Future;
+use tokio::sync::Mutex;
+use std::pin::Pin;
+use std::sync::Arc;
+use schnellru::ByMemoryUsage;
 use std::cell::RefCell;
+use std::marker::PhantomData;
+
 use std::fs;
 use std::hash::BuildHasher;
 use std::hash::Hasher;
@@ -17,12 +28,17 @@ use std::collections::BinaryHeap;
 use std::io::Read;
 use std::io::Write;
 
+use schnellru::LruMap;
+
+
 // facade for table accesses. combines serde with knowledge of ondisk structure to provide clean api.
 // also provides API for a couple of different types of iterators to write table.
 // TODO: implementation has tons of magic values. is there a better way to do this?
 // I think the best thing to do is isolate seek logic + offset io to internal functions
 // TODO: this needs to be asyncified, but there are lots of issues with that (async iterators, ord in heaps with async)
 pub struct Table {
+    level: u8,
+    name: u8,
     file: File,
     total_data_bytes: Option<u64>,
     current_block: Option<DataBlock>,
@@ -32,7 +48,7 @@ pub struct Table {
 pub const BLOCK_SIZE: usize = 4_000;
 
 impl Table {
-    pub fn new(path: PathBuf, reading: bool) -> io::Result<Self> {
+    pub fn new(path: PathBuf, reading: bool, level: u8, name: u8) -> io::Result<Self> {
         if !reading && !path.parent().unwrap().exists() {
             fs::create_dir(path.parent().unwrap())?;
         }
@@ -51,6 +67,8 @@ impl Table {
                 total_data_bytes,
                 current_block: None,
                 current_block_idx: 0,
+                level,
+                name
             });
         }
         return Ok(Table {
@@ -58,6 +76,8 @@ impl Table {
             total_data_bytes,
             current_block: None,
             current_block_idx: 0,
+            level,
+            name
         });
     }
     // TODO: rework this to become private
@@ -78,7 +98,7 @@ impl Table {
         Ok(index)
     }
     // TODO: fix filter
-    // fn get_filter(&mut self) -> io::Result<CuckooFilter<FastMurmur3Hasher>> {
+    // fn get_filter(&mut self) -> io::Result<Bloom<Vec<u8>>> {
     //     self.file.seek(SeekFrom::End(-16))?;
     //     let filter_offset = self.file.read_u64::<LittleEndian>()?;
     //     self.file.seek(SeekFrom::Start(filter_offset))?;
@@ -154,6 +174,7 @@ impl Table {
         self.file.write_u64::<LittleEndian>(index.len() as u64)?;
         self.file.write_all(&index)?;
         let ex_filter = filter.bit_vec();
+        // export_filter(filter);
         self.file
             .write_u64::<LittleEndian>(ex_filter.len() as u64)?;
         self.file.write_all(&ex_filter.to_bytes())?;
@@ -464,6 +485,72 @@ impl BuildHasher for FastMurmur3 {
     fn build_hasher(&self) -> Self::Hasher {
         FastMurmur3Hasher::default()
     }
+}
+// lock on this state
+struct CacheState<T> {
+    cache: LruMap<String, T, ByMemoryUsage>,
+    // let's use a vector of oneshot channels, as barrier does not send any data
+    waiting: HashMap<String, Vec<Sender<T>>>
+}
+// made this generic so I can use sister types + so I can use this in b-epsilon storage implementation
+// T: what we cache, S: what we use in get to retrieve, F: how we retrieve, E: templated to be able to use yadberror from sister file
+pub struct AsyncCache<T, S, F, E> 
+where T: Clone + Debug,
+F: Fn(S, &String) -> Pin<Box<dyn Future<Output=Result<T, E>>>>  {
+    cache: Arc<Mutex<CacheState<T>>>,
+    retrieve: F,
+    // needed for rust compiler to be okay with S
+    marker: PhantomData<S>
+}
+
+impl<T, S, F, E> AsyncCache<T, S, F, E> 
+where
+// debug is temporary
+    T: Clone + Debug,
+    F: Fn(S, &String) -> Pin<Box<dyn Future<Output=Result<T, E>>>>,{
+    pub fn new(max_bytes: usize, retrieve: F) -> Self {
+        return Self {cache: Arc::new(Mutex::new(CacheState { cache: LruMap::new(ByMemoryUsage::new(max_bytes)), waiting: HashMap::new() })), retrieve, marker: PhantomData};
+    }
+    pub async fn get(self, io_wrapper: S, key: String) -> Result<T, E> {
+        let cloned = self.cache.clone();
+        let mut cache = cloned.lock().await;
+        let potential_hit = cache.cache.get(&key);
+        if potential_hit.is_some() {
+            return Ok(potential_hit.unwrap().clone());
+        }
+        // not a hit, is there a waiting list? 
+        // if so, join it
+        if cache.waiting.contains_key(&key) {
+            let (tx, rx) = oneshot::channel();
+            cache.waiting.get_mut(&key).unwrap().push(tx);
+            return Ok(rx.await.unwrap());
+        }
+        // let's start the waiting for everyone
+        cache.waiting.insert(key.clone(), Vec::new());
+        // drop lock for concurrency, send read IO
+        std::mem::drop(cache);
+        let res = (self.retrieve)(io_wrapper, &key).await?;
+        // get lock back, store value, alert others, return for ourselves
+        let cloned = self.cache.clone();
+        let mut cache = cloned.lock().await;
+        for chan in cache.waiting.get_mut(&key).unwrap().drain(..) {
+            chan.send(res.clone()).unwrap();
+        }
+        cache.cache.insert(key.clone(), res.clone());
+        cache.waiting.remove(&key);
+        return Ok(res);
+    }
+}
+
+
+struct LSMCache {
+    index_cache: LruMap<String, Index, ByMemoryUsage>,
+    // filter_cache: LruMap<String, Blo
+    block_cache: LruMap<String, DataBlock, ByMemoryUsage>
+}
+
+impl LSMCache {
+
 }
 
 #[cfg(test)]

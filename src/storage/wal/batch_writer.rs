@@ -17,8 +17,10 @@ enum WriterCommand {
     Reset(oneshot::Sender<()>),
 }
 
-
+// am I using a channel just to use a channel? why not contend on a lock?
+// channels make it much simpler to handle timing
 // there is a library for this- tower-batch or smth like that
+// TODO: come back and remove unwraps that would result in error or push errors along
 impl AsyncBufferedWriter {
     pub fn new(flush_limit: usize, time_limit: Duration, file: File) -> Self {
         // TODO: what is a good buffer length?
@@ -133,9 +135,6 @@ impl AsyncBufferedWriter {
     pub fn write(&self, data: Vec<u8>) -> Receiver<()> {
         let (tx, rx) = oneshot::channel();
         self.channel.send(WriterCommand::Write(data, tx)).unwrap();
-        
-        // NOTE: if writer task responds before or after we await, nothing is lost
-        // so, no race condition.
         return rx;
     }
 

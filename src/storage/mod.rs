@@ -39,7 +39,7 @@ pub use memtable::MAX_MEMTABLE_SIZE;
 // TODO: exposing these for integration test- should allow user to specify this in code
 pub const TABLES_UNTIL_COMPACTION: u8 = 3;
 struct TreeState {
-    num_levels: Option<usize>,
+    num_levels: Option<u8>,
     tables_per_level: Option<[u8; 5]>,
     path: PathBuf
 }
@@ -141,8 +141,8 @@ impl Tree {
         // # of sstables should match header
         // sstable names should be increasing (0 - # - 1)
         // header should agree with reality
-        let mut num_levels: usize = 5;
-        while num_levels != 0 && ts.tables_per_level.unwrap()[num_levels - 1] == 0 {
+        let mut num_levels: u8 = 5;
+        while num_levels != 0 && ts.tables_per_level.unwrap()[(num_levels - 1) as usize] == 0 {
             num_levels -= 1;
         }
         // stuff is getting initialized in too many places...is there a better way to do this?
@@ -233,7 +233,7 @@ impl Tree {
     }
 
     fn search_table(
-        level: usize,
+        level: u8,
         table: u8,
         key: &Vec<u8>,
         ts: &TreeState
@@ -244,8 +244,9 @@ impl Tree {
                 .join(level.to_string())
                 .join(table.to_string()),
             true,
+            level,
+            table
         )?;
-        // TODO: filter is giving false negatives -> serde with filter is wrong or there is nondeterminism
         // let filter = table.get_filter()?;
         // if !filter.contains(key) {
         //     return Ok(None);
@@ -259,7 +260,7 @@ impl Tree {
         // TODO: could use binary search here
         for (cantidate_key, value) in block.entries.iter_mut() {
             if cantidate_key == key {
-                return Ok(Some(std::mem::replace(value, Vec::new())));
+                return Ok(Some(value.clone()));
             }
         }
         return Ok(None);
@@ -282,7 +283,7 @@ impl Tree {
                 return Ok(Some(res));
             }
             for level in 0..ts.num_levels.unwrap() {
-                for sstable in (0..ts.tables_per_level.unwrap()[level]).rev() {
+                for sstable in (0..ts.tables_per_level.unwrap()[level as usize]).rev() {
                     // TODO: if value vector is empty, this is a tombstone
                     if let Some(res) = Self::search_table(level, sstable, &key, &ts)? {
                         // empty length vector is tombstone
@@ -312,7 +313,7 @@ impl Tree {
         assert!(!ts.path.join("0").join(filename.to_string()).exists());
 
         let new_path = ts.path.join("0").join(table_to_write.to_string());
-        let mut table = Table::new(new_path, false)?;
+        let mut table = Table::new(new_path, false, 0, filename)?;
         let skipmap_len = skipmap.len();
         table.write_table(
             skipmap.into_iter(),
@@ -335,15 +336,15 @@ impl Tree {
         Ok(())
     }
 
-    fn compact_level(level: usize, ts: &mut TreeState) -> io::Result<()> {
+    fn compact_level(level: u8, ts: &mut TreeState) -> io::Result<()> {
         assert!(level != 4);
-        let new_table = ts.tables_per_level.unwrap()[level + 1];
+        let new_table = ts.tables_per_level.unwrap()[(level + 1) as usize];
         let new_table_path = ts.path
             .join((level + 1).to_string())
             .join(new_table.to_string());
-        let mut table = Table::new(new_table_path, false)?;
+        let mut table = Table::new(new_table_path, false, level + 1, new_table)?;
         let mut tables = (0..TABLES_UNTIL_COMPACTION)
-            .map(|x| Table::new(ts.path.join(level.to_string()).join(x.to_string()), true))
+            .map(|x| Table::new(ts.path.join(level.to_string()).join(x.to_string()), true, level, x))
             .collect::<io::Result<Vec<Table>>>()?;
         // will at worst be a k tables * num keys overestimate
         // unique keys recalculated each compaction, so this will not worsen
@@ -363,15 +364,15 @@ impl Tree {
         // for compaction, there is a new failure point: between writing the table and deleting the old level
         // if this fails, on init, the database will recompact the old files and duplicate the data
         // this does not impact correctness (latest table would be read first), but space performance and write performance (compaction happens sooner)
-        ts.tables_per_level.as_mut().unwrap()[level] = 0;
-        if ts.tables_per_level.unwrap()[level + 1] == 0 {
+        ts.tables_per_level.as_mut().unwrap()[level as usize] = 0;
+        if ts.tables_per_level.unwrap()[(level + 1) as usize] == 0 {
             ts.num_levels = Some(ts.num_levels.unwrap() + 1);
         }
 
         // TODO: unwrapping makes a copy if you do not do as_mut
         // investigate if there are any other bugs causes by me not doing this
         // is there a good way to avoid this?
-        ts.tables_per_level.as_mut().unwrap()[level + 1] += 1;
+        ts.tables_per_level.as_mut().unwrap()[(level + 1) as usize] += 1;
         fs::remove_dir_all(ts.path.join(level.to_string()))?;
 
         Self::commit_header(ts)?;
@@ -379,9 +380,9 @@ impl Tree {
         Ok(())
     }
     fn compact(ts: &mut TreeState) -> io::Result<()> {
-        let mut level = 0;
+        let mut level: u8 = 0;
         // this may fail between compactions, so we need to check if we need to compact on startup
-        while ts.tables_per_level.unwrap()[level] == TABLES_UNTIL_COMPACTION {
+        while ts.tables_per_level.unwrap()[level as usize] == TABLES_UNTIL_COMPACTION {
             Self::compact_level(level, ts)?;
             level += 1;
         }
