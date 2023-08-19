@@ -9,6 +9,7 @@ RIGHT NOW:
 TODO:
 
 TODO LATER (NEEDS PRIORITIZATION):
+- add ycsb benchmarks (there is a repo for this, but it needs to be extended to make it work with this (this repo's support for adding new engines is in progress/stale, need to reach out to them)) 
 - verify (prove) db durability + implement FS level manifest WAL to handle multiple/non atomic FS operations (varies OS to OS, everything should be atomic if POSIX compliant)
 - eliminate needless copies (is this done)
 - implement custom merge operator

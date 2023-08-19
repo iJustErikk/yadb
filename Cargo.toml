@@ -23,6 +23,7 @@ byteorder = "1.4.3"
 fastmurmur3 = "0.1.2"
 bloomfilter = "1.0.9"
 schnellru = "0.2.1"
+futures = "0.3.28"
 
 # only used in unit/integratiojn tests
 [dev-dependencies]

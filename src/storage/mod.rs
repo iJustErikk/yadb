@@ -4,6 +4,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::sync::Arc;
 
+use futures::future::BoxFuture;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
@@ -24,8 +25,11 @@ pub use errors::YAStorageError;
 
 // sstable- should I rename table?
 mod table;
-use table::{search_index, MergedTableIterators, Table};
+use table::{search_index, MergedTableIterators, Table, Index, DataBlock};
 pub use memtable::MAX_MEMTABLE_SIZE;
+
+mod async_cache;
+use async_cache::AsyncCache;
 
 // look into: no copy network -> fs, I believe kafka does something like this
 // TODO: go through with checklist to make sure the database can fail at any point during wal replay, compaction or memtable flush
@@ -41,7 +45,33 @@ pub const TABLES_UNTIL_COMPACTION: u8 = 3;
 struct TreeState {
     num_levels: Option<u8>,
     tables_per_level: Option<[u8; 5]>,
-    path: PathBuf
+    path: PathBuf,
+    cache: LSMCache
+}
+struct LSMCache {
+    // filter_cache
+    index_cache: AsyncCache<Index, Table, (), YAStorageError>,
+    block_cache: AsyncCache<DataBlock, Table, u64, YAStorageError>
+}
+pub const MAX_INDEX_CACHE_BYTES: usize = 5_000_000;
+pub const MAX_BLOCK_CACHE_BYTES: usize = 5_000_000;
+impl LSMCache { 
+    // making this work with async now rather than later
+    fn get_index(mut table: Table, _: ()) -> BoxFuture<'static, Result<(Index, Table), YAStorageError>> {
+        return Box::pin(async move {Ok((table.get_index()?, table))});
+    }
+
+    fn get_block(mut table: Table, offset: u64) -> BoxFuture<'static, Result<(DataBlock, Table), YAStorageError>> {
+        return Box::pin(async move {Ok((table.get_datablock(offset)?, table))});
+    }
+
+    fn new() -> Self {
+        return LSMCache {
+            // filter_cache
+            index_cache: AsyncCache::new(MAX_INDEX_CACHE_BYTES, Box::new(Self::get_index)),
+            block_cache: AsyncCache::new(MAX_INDEX_CACHE_BYTES, Box::new(Self::get_block))
+        };
+    }
 }
 struct MemtableWal {
     memtable: Memtable,
@@ -63,6 +93,7 @@ impl Tree {
                 num_levels: None,
                 tables_per_level: None,
                 path: PathBuf::from(path),
+                cache: LSMCache::new()
             })),
             mw: Arc::new(RwLock::new(MemtableWal {
                 memtable: Memtable {
@@ -212,7 +243,7 @@ impl Tree {
 
 
     // PRECONDITION: wal_file exists, this is only ever run after first startup
-    async fn restore_wal(&self, ts: &mut TreeState, mw: &mut MemtableWal) -> io::Result<()> {
+    async fn restore_wal(&self, ts: &mut TreeState, mw: &mut MemtableWal) -> Result<(), YAStorageError> {
         let mut wal_file =
             TokioOpenOptions::new()
                 .write(true)
@@ -225,43 +256,42 @@ impl Tree {
             return Ok(())
         }
 
-        Self::write_skipmap_as_sstable(skipmap, ts)?;
+        Self::write_skipmap_as_sstable(skipmap, ts).await?;
         wal_file.set_len(0).await?;
         wal_file.sync_all().await?;
 
         Ok(())
     }
 
-    fn search_table(
+    async fn search_table(
         level: u8,
-        table: u8,
+        table_num: u8,
         key: &Vec<u8>,
         ts: &TreeState
     ) -> Result<Option<Vec<u8>>, YAStorageError> {
-        let mut table: Table = Table::new(
+        let table: Table = Table::new(
             ts.path
                 .clone()
                 .join(level.to_string())
-                .join(table.to_string()),
+                .join(table_num.to_string()),
             true,
-            level,
-            table
         )?;
+        // TODO: readd filters, cache them, MAKE SURE TO INVALIDATE
         // let filter = table.get_filter()?;
         // if !filter.contains(key) {
         //     return Ok(None);
         // }
-        let index = table.get_index()?;
+        let (index, table) = ts.cache.index_cache.get(table, level.to_string() + "/" + &table_num.to_string(), ()).await?;
         let byte_offset = search_index(&index, key);
         if byte_offset.is_none() {
             return Ok(None);
         }
-        let mut block = table.get_datablock(byte_offset.unwrap())?;
-        // TODO: could use binary search here
-        for (cantidate_key, value) in block.entries.iter_mut() {
-            if cantidate_key == key {
-                return Ok(Some(value.clone()));
-            }
+        let byte_offset = byte_offset.unwrap();
+        let (block, _) = ts.cache.block_cache.get(table, level.to_string() + "/" + &table_num.to_string() + "/" + &byte_offset.to_string(), byte_offset).await?;
+
+        let maybe_index = block.entries.binary_search_by(|(cantidate_key, _)| cantidate_key.cmp(key));
+        if maybe_index.is_ok() {
+            return Ok(Some(block.entries[maybe_index.unwrap()].1.clone()));
         }
         return Ok(None);
     }
@@ -285,7 +315,7 @@ impl Tree {
             for level in 0..ts.num_levels.unwrap() {
                 for sstable in (0..ts.tables_per_level.unwrap()[level as usize]).rev() {
                     // TODO: if value vector is empty, this is a tombstone
-                    if let Some(res) = Self::search_table(level, sstable, &key, &ts)? {
+                    if let Some(res) = Self::search_table(level, sstable, &key, &ts).await? {
                         // empty length vector is tombstone
                         // clients cannot write an empty length value
                         // they might want to represent NULL- this should be a field for the user
@@ -301,7 +331,7 @@ impl Tree {
         
     }
 
-    fn write_skipmap_as_sstable(skipmap: SkipMap<Vec<u8>, Vec<u8>>, ts: &mut TreeState) -> io::Result<()> {
+    async fn write_skipmap_as_sstable(skipmap: SkipMap<Vec<u8>, Vec<u8>>, ts: &mut TreeState) -> Result<(), YAStorageError> {
         let table_to_write = ts.tables_per_level.unwrap()[0];
         if !ts.path.join("0").exists() {
             fs::create_dir(ts.path.join("0"))?;
@@ -313,7 +343,7 @@ impl Tree {
         assert!(!ts.path.join("0").join(filename.to_string()).exists());
 
         let new_path = ts.path.join("0").join(table_to_write.to_string());
-        let mut table = Table::new(new_path, false, 0, filename)?;
+        let mut table = Table::new(new_path, false)?;
         let skipmap_len = skipmap.len();
         table.write_table(
             skipmap.into_iter(),
@@ -325,7 +355,7 @@ impl Tree {
             ts.num_levels = Some(1);
         }
         Self::commit_header(ts)?;
-        Self::compact(ts)?;
+        Self::compact(ts).await?;
 
         Ok(())
     }
@@ -336,15 +366,31 @@ impl Tree {
         Ok(())
     }
 
-    fn compact_level(level: u8, ts: &mut TreeState) -> io::Result<()> {
+    async fn clear_cache_for_level(ts: &mut TreeState, level: u8) -> Result<(), YAStorageError> {
+        for table_num in 0..TABLES_UNTIL_COMPACTION {
+            // we incur 10 read ios here- we can eliminate this if we have a more robust in-memory reprsentation of on-disk state
+            let num_blocks = Table::new(ts.path.join(level.to_string()).join(table_num.to_string()).clone(), true)?.get_num_blocks()?;
+            ts.cache.index_cache.reset_keys([level.to_string() + "/" + &table_num.to_string()].to_vec()).await;
+            let mut to_delete = Vec::new();
+            for block in 0..num_blocks {
+                to_delete.push(level.to_string() + "/" + &table_num.to_string() + "/" + &block.to_string());
+            }
+            ts.cache.block_cache.reset_keys(to_delete).await;
+        }
+        Ok(())
+    }
+
+    async fn compact_level(level: u8, ts: &mut TreeState) -> Result<(), YAStorageError> {
         assert!(level != 4);
+        // do this before writes/deletes so we can still read indices
+        Self::clear_cache_for_level(ts, level).await?;
         let new_table = ts.tables_per_level.unwrap()[(level + 1) as usize];
         let new_table_path = ts.path
             .join((level + 1).to_string())
             .join(new_table.to_string());
-        let mut table = Table::new(new_table_path, false, level + 1, new_table)?;
+        let mut table = Table::new(new_table_path, false)?;
         let mut tables = (0..TABLES_UNTIL_COMPACTION)
-            .map(|x| Table::new(ts.path.join(level.to_string()).join(x.to_string()), true, level, x))
+            .map(|x| Table::new(ts.path.join(level.to_string()).join(x.to_string()), true))
             .collect::<io::Result<Vec<Table>>>()?;
         // will at worst be a k tables * num keys overestimate
         // unique keys recalculated each compaction, so this will not worsen
@@ -377,13 +423,14 @@ impl Tree {
 
         Self::commit_header(ts)?;
 
+
         Ok(())
     }
-    fn compact(ts: &mut TreeState) -> io::Result<()> {
+    async fn compact(ts: &mut TreeState) -> Result<(), YAStorageError> {
         let mut level: u8 = 0;
         // this may fail between compactions, so we need to check if we need to compact on startup
         while ts.tables_per_level.unwrap()[level as usize] == TABLES_UNTIL_COMPACTION {
-            Self::compact_level(level, ts)?;
+            Self::compact_level(level, ts).await?;
             level += 1;
         }
         Ok(())
@@ -407,7 +454,7 @@ impl Tree {
 
         if mw.memtable.needs_flush() {
             let skipmap = mw.memtable.get_skipmap();
-            Self::write_skipmap_as_sstable(skipmap, &mut ts)?;
+            Self::write_skipmap_as_sstable(skipmap, &mut ts).await?;
             mw.memtable.reset();
             mw.wal.reset().await?;
             return Ok(());
