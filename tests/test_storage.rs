@@ -197,7 +197,8 @@ enum DBResult {
     Get(Result<Result<Option<Vec<u8>>, yadb::storage::YAStorageError>, JoinError>)
 }
 
-
+// could make this better
+// zipf key distribution, scans
 fn generate_benchmark(mut tree: Tree, rounds: i32, gpd_weights: [i32; 3], key_range: [i32; 2], val_bytes: usize) -> FuturesUnordered<std::pin::Pin<Box<dyn Future<Output = DBResult> + Send>>> {
     let futures = FuturesUnordered::new();
     let mut rng = SmallRng::seed_from_u64(42);
@@ -236,12 +237,7 @@ fn generate_benchmark(mut tree: Tree, rounds: i32, gpd_weights: [i32; 3], key_ra
     return futures;
 }
 
-// orig benchmark 5k gpd 10 bytes 160 ops / second
-// recent benchmark:
-// 50000 gp * 2 (200K), 100 bytes, 200K tot ops / 2.5 seconds -> 80000 ops/second
-// 20 million bytes in 2.5 seconds -> 8 million bytes or 7.62MB/second (if we 10x the value size, we nearly get to nearly 20 MB/second)
-// current (using new pseudorandom generator):
-// 50000 rounds gp probs of 50% each, 0-50k key range, 100 byte value -> slow, need to investigate
+// 50000 rounds gp probs of 50% each, 0-50k key range, 100 byte value -> 2.5 seconds, 5MB data -> 20K ops/second, 2MB/second
 // interesting: why not specify expected collision rate rather than key range?
 // then we can compute the key range and we have a better knob
 // uniform distribution
