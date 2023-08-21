@@ -237,7 +237,9 @@ fn generate_benchmark(mut tree: Tree, rounds: i32, gpd_weights: [i32; 3], key_ra
     return futures;
 }
 
-// 50000 rounds gp probs of 50% each, 0-50k key range, 100 byte value -> 2.5 seconds, 5MB data -> 20K ops/second, 2MB/second
+// 50000 rounds gp probs of 50% each, 0-50k key range, 100 byte value -> 1.5 seconds, 5MB data -> 34K ops/second, 3.4MB/second
+// not a 5x improvement, but a good result nonetheless
+// what if we just passed synchronous closures? this is stretching the definition of a cache but avoids very complicated workarounds to ensuring cache entry lifetimes.
 // interesting: why not specify expected collision rate rather than key range?
 // then we can compute the key range and we have a better knob
 // uniform distribution
@@ -257,6 +259,26 @@ async fn split_bench() -> Result<(), Box<dyn Error>> {
     }
     Ok(())
 }
+
+// 50MB in 5 seconds -> 10MB/second
+#[tokio::test]
+async fn split_bench_big_value() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+    tree.init().await.expect("Failed to init folder");
+    let mut futures = generate_benchmark(tree, 50000, [50, 50, 0], [0, 50000], 10000);
+       
+
+    while let Some(result) = futures.next().await {
+        match result {
+            DBResult::Get(res) => { res??; },
+            DBResult::Empty(res) => { res??; },
+        }
+    }
+    Ok(())
+}
+
+// running above test for values of 10KB results in a panick- that is only 500MB but it uses all levels?
 
 /* Things to test:
 test compaction

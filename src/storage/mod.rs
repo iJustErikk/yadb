@@ -50,8 +50,8 @@ struct TreeState {
 }
 struct LSMCache {
     // filter_cache
-    index_cache: AsyncCache<Index, Table, (), YAStorageError>,
-    block_cache: AsyncCache<DataBlock, Table, u64, YAStorageError>
+    index_cache: AsyncCache<Index, Table, (), Option<u64>, YAStorageError>,
+    block_cache: AsyncCache<DataBlock, Table, u64, Option<Vec<u8>>, YAStorageError>
 }
 pub const MAX_INDEX_CACHE_BYTES: usize = 5_000_000;
 pub const MAX_BLOCK_CACHE_BYTES: usize = 5_000_000;
@@ -65,11 +65,23 @@ impl LSMCache {
         return Box::pin(async move {Ok((table.get_datablock(offset)?, table))});
     }
 
+    fn index_callback(index: &Index, key: Vec<u8>) -> Option<u64> {
+        return search_index(index, &key);
+    }
+
+    fn block_callback(block: &DataBlock, search_key: Vec<u8>) -> Option<Vec<u8>> {
+        let maybe_index = block.entries.binary_search_by(|(cantidate_key, _)| cantidate_key.cmp(&search_key));
+        if maybe_index.is_ok() {
+            return Some(block.entries[maybe_index.unwrap()].1.clone());
+        }
+        return None;
+    }
+
     fn new() -> Self {
         return LSMCache {
             // filter_cache
-            index_cache: AsyncCache::new(MAX_INDEX_CACHE_BYTES, Box::new(Self::get_index)),
-            block_cache: AsyncCache::new(MAX_INDEX_CACHE_BYTES, Box::new(Self::get_block))
+            index_cache: AsyncCache::new(MAX_INDEX_CACHE_BYTES, Box::new(Self::get_index), Box::new(Self::index_callback)),
+            block_cache: AsyncCache::new(MAX_INDEX_CACHE_BYTES, Box::new(Self::get_block), Box::new(Self::block_callback))
         };
     }
 }
@@ -263,6 +275,8 @@ impl Tree {
         Ok(())
     }
 
+    
+
     async fn search_table(
         level: u8,
         table_num: u8,
@@ -281,19 +295,14 @@ impl Tree {
         // if !filter.contains(key) {
         //     return Ok(None);
         // }
-        let (index, table) = ts.cache.index_cache.get(table, level.to_string() + "/" + &table_num.to_string(), ()).await?;
-        let byte_offset = search_index(&index, key);
+        let (byte_offset, table) = ts.cache.index_cache.get(table, level.to_string() + "/" + &table_num.to_string(), (), key.clone()).await?;
         if byte_offset.is_none() {
             return Ok(None);
         }
         let byte_offset = byte_offset.unwrap();
-        let (block, _) = ts.cache.block_cache.get(table, level.to_string() + "/" + &table_num.to_string() + "/" + &byte_offset.to_string(), byte_offset).await?;
+        let (in_block, _) = ts.cache.block_cache.get(table, level.to_string() + "/" + &table_num.to_string() + "/" + &byte_offset.to_string(), byte_offset, key.clone()).await?;
 
-        let maybe_index = block.entries.binary_search_by(|(cantidate_key, _)| cantidate_key.cmp(key));
-        if maybe_index.is_ok() {
-            return Ok(Some(block.entries[maybe_index.unwrap()].1.clone()));
-        }
-        return Ok(None);
+        return Ok(in_block);
     }
     // TODO: these should take in slices, not vector refs
     pub fn get(&self, key: &Vec<u8>) -> JoinHandle<Result<Option<Vec<u8>>, YAStorageError>> {
