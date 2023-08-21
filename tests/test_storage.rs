@@ -261,12 +261,18 @@ async fn split_bench() -> Result<(), Box<dyn Error>> {
 }
 
 // 50MB in 5 seconds -> 10MB/second
+// 10k ops/sec -> 18% table new, could maybe cut down on read ios/read io bandwith via bloom filter (esp with higher read amplificaion)
+// 20% wal persistence (can be tuned to reduce # ios but same amount of bandwith)
+// 25% test/tokio/write overhead
+// test/tokio/write overhead -> minimal ability to optimize
+// 55% time spent on reads -> bloom filters could potentially speed this up
+// 20% on wal persistence -> could be tuned
 #[tokio::test]
 async fn split_bench_big_value() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
     tree.init().await.expect("Failed to init folder");
-    let mut futures = generate_benchmark(tree, 50000, [50, 50, 0], [0, 50000], 10000);
+    let mut futures = generate_benchmark(tree, 50000, [50, 50, 0], [0, 50000], 1000);
        
 
     while let Some(result) = futures.next().await {
