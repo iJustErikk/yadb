@@ -24,7 +24,7 @@ use std::io::Write;
 // TODO: implementation has tons of magic values. is there a better way to do this?
 // I think the best thing to do is isolate seek logic + offset io to internal functions
 // TODO: this needs to be asyncified, but there are lots of issues with that (async iterators, ord in heaps with async)
-pub struct Table {
+pub struct SSTable {
     file: File,
     total_data_bytes: Option<u64>,
     current_block: Option<DataBlock>,
@@ -33,7 +33,7 @@ pub struct Table {
 
 pub const BLOCK_SIZE: usize = 4_000;
 
-impl Table {
+impl SSTable {
     pub fn new(path: PathBuf, reading: bool) -> io::Result<Self> {
         if !reading && !path.parent().unwrap().exists() {
             fs::create_dir(path.parent().unwrap())?;
@@ -48,14 +48,14 @@ impl Table {
             file.seek(SeekFrom::End(-24))?;
             let total_data_bytes = Some(file.read_u64::<LittleEndian>()?);
             file.seek(SeekFrom::Start(0))?;
-            return Ok(Table {
+            return Ok(SSTable {
                 file,
                 total_data_bytes,
                 current_block: None,
                 current_block_idx: 0,
             });
         }
-        return Ok(Table {
+        return Ok(SSTable {
             file,
             total_data_bytes,
             current_block: None,
@@ -118,8 +118,10 @@ impl Table {
         // even by 20 tables, this is still better than guessing (~54%)
         // so if we cache the bloom filters on startup, this is an option.
         let mut index: Vec<u8> = Vec::new();
-        let mut data_section: Vec<u8> = Vec::new();
+        let mut data_len = 0;
+        // TODO: most blocks will be slightly larger than 4kb- we can reserve to save some time
         let mut current_block: Vec<u8> = Vec::new();
+        current_block.reserve(4096);
         // needs to be roughly uniform, deterministic and fast -> not the default hasher
         // interesting read: https://www.eecs.harvard.edu/~michaelm/postscripts/tr-02-05.pdf
         // TODO: look into hash DOS attacks
@@ -133,7 +135,7 @@ impl Table {
             if current_block.is_empty() {
                 index.write_u64::<LittleEndian>(key.len() as u64)?;
                 index.extend(&key);
-                index.write_u64::<LittleEndian>(data_section.len() as u64)?;
+                index.write_u64::<LittleEndian>(data_len as u64)?;
             }
             // TODO: this will pack things into blocks until they exceed 4kb
             // that means most reads will be 2 blocks
@@ -143,18 +145,21 @@ impl Table {
             current_block.write_u64::<LittleEndian>(value.len() as u64)?;
             current_block.extend(value);
             if current_block.len() >= BLOCK_SIZE {
-                data_section.write_u64::<LittleEndian>(current_block.len() as u64)?;
-                data_section.append(&mut current_block);
+                self.file.write_u64::<LittleEndian>(current_block.len() as u64)?;
+                self.file.write_all(&mut current_block)?;
+                data_len += current_block.len() + 8;
+                current_block = Vec::new();
+                current_block.reserve(4096);
             }
             unique_keys += 1;
         }
         // write last block if not already written
         if current_block.len() > 0 {
-            data_section.write_u64::<LittleEndian>(current_block.len() as u64)?;
-            data_section.append(&mut current_block);
+            self.file.write_u64::<LittleEndian>(current_block.len() as u64)?;
+            self.file.write_all(&mut current_block)?;
+            data_len += current_block.len() + 8;
         }
 
-        self.file.write_all(&data_section)?;
         self.file.write_u64::<LittleEndian>(index.len() as u64)?;
         self.file.write_all(&index)?;
         let ex_filter = bincode::serialize(&filter).unwrap();
@@ -163,9 +168,9 @@ impl Table {
         self.file.write_all(&ex_filter)?;
         // footer: 8 bytes for index offset, 8 for filter offset, 8 for unique keys
         // TODO: magic value
-        let filter_offset = index.len() + data_section.len() + 8;
+        let filter_offset = index.len() + data_len + 8;
         self.file
-            .write_u64::<LittleEndian>(data_section.len() as u64)?;
+            .write_u64::<LittleEndian>(data_len as u64)?;
         self.file.write_u64::<LittleEndian>(filter_offset as u64)?;
         self.file.write_u64::<LittleEndian>(unique_keys)?;
         self.file.sync_all()?;
@@ -173,7 +178,7 @@ impl Table {
     }
 }
 
-impl Iterator for Table {
+impl Iterator for SSTable {
     // this iterator can return errors
     type Item = io::Result<(Vec<u8>, Vec<u8>)>;
 
@@ -338,7 +343,7 @@ pub struct MergedTableIterators {
 
 struct TableNum {
     // we are using refcell so we can peek
-    table: RefCell<Peekable<Table>>,
+    table: RefCell<Peekable<SSTable>>,
     num: usize,
 }
 
@@ -408,7 +413,7 @@ impl Ord for TableNum {
 }
 
 impl MergedTableIterators {
-    pub fn new(tables: Vec<Table>) -> io::Result<Self> {
+    pub fn new(tables: Vec<SSTable>) -> io::Result<Self> {
         let mut heap: BinaryHeap<TableNum> = BinaryHeap::new();
         for (num, table) in tables.into_iter().enumerate() {
             let mut peekable_table = table.peekable();

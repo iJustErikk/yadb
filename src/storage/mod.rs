@@ -24,8 +24,8 @@ mod errors;
 pub use errors::YAStorageError;
 
 // sstable- should I rename table?
-mod table;
-use table::{search_index, MergedTableIterators, Table, Index, DataBlock};
+mod sstable;
+use sstable::{search_index, MergedTableIterators, SSTable, Index, DataBlock};
 pub use memtable::MAX_MEMTABLE_SIZE;
 
 mod async_cache;
@@ -50,18 +50,18 @@ struct TreeState {
 }
 struct LSMCache {
     // filter_cache
-    index_cache: AsyncCache<Index, Table, (), Option<u64>, YAStorageError>,
-    block_cache: AsyncCache<DataBlock, Table, u64, Option<Vec<u8>>, YAStorageError>
+    index_cache: AsyncCache<Index, SSTable, (), Option<u64>, YAStorageError>,
+    block_cache: AsyncCache<DataBlock, SSTable, u64, Option<Vec<u8>>, YAStorageError>
 }
 pub const MAX_INDEX_CACHE_BYTES: usize = 5_000_000;
 pub const MAX_BLOCK_CACHE_BYTES: usize = 5_000_000;
 impl LSMCache { 
     // making this work with async now rather than later
-    fn get_index(mut table: Table, _: ()) -> BoxFuture<'static, Result<(Index, Table), YAStorageError>> {
+    fn get_index(mut table: SSTable, _: ()) -> BoxFuture<'static, Result<(Index, SSTable), YAStorageError>> {
         return Box::pin(async move {Ok((table.get_index()?, table))});
     }
 
-    fn get_block(mut table: Table, offset: u64) -> BoxFuture<'static, Result<(DataBlock, Table), YAStorageError>> {
+    fn get_block(mut table: SSTable, offset: u64) -> BoxFuture<'static, Result<(DataBlock, SSTable), YAStorageError>> {
         return Box::pin(async move {Ok((table.get_datablock(offset)?, table))});
     }
 
@@ -283,7 +283,7 @@ impl Tree {
         key: &Vec<u8>,
         ts: &TreeState
     ) -> Result<Option<Vec<u8>>, YAStorageError> {
-        let mut table: Table = Table::new(
+        let mut table: SSTable = SSTable::new(
             ts.path
                 .clone()
                 .join(level.to_string())
@@ -352,7 +352,7 @@ impl Tree {
         assert!(!ts.path.join("0").join(filename.to_string()).exists());
 
         let new_path = ts.path.join("0").join(table_to_write.to_string());
-        let mut table = Table::new(new_path, false)?;
+        let mut table = SSTable::new(new_path, false)?;
         let skipmap_len = skipmap.len();
         table.write_table(
             skipmap.into_iter(),
@@ -378,7 +378,7 @@ impl Tree {
     async fn clear_cache_for_level(ts: &mut TreeState, level: u8) -> Result<(), YAStorageError> {
         for table_num in 0..TABLES_UNTIL_COMPACTION {
             // we incur 10 read ios here- we can eliminate this if we have a more robust in-memory reprsentation of on-disk state
-            let num_blocks = Table::new(ts.path.join(level.to_string()).join(table_num.to_string()).clone(), true)?.get_num_blocks()?;
+            let num_blocks = SSTable::new(ts.path.join(level.to_string()).join(table_num.to_string()).clone(), true)?.get_num_blocks()?;
             ts.cache.index_cache.reset_keys([level.to_string() + "/" + &table_num.to_string()].to_vec()).await;
             let mut to_delete = Vec::new();
             for block in 0..num_blocks {
@@ -397,10 +397,10 @@ impl Tree {
         let new_table_path = ts.path
             .join((level + 1).to_string())
             .join(new_table.to_string());
-        let mut table = Table::new(new_table_path, false)?;
+        let mut table = SSTable::new(new_table_path, false)?;
         let mut tables = (0..TABLES_UNTIL_COMPACTION)
-            .map(|x| Table::new(ts.path.join(level.to_string()).join(x.to_string()), true))
-            .collect::<io::Result<Vec<Table>>>()?;
+            .map(|x| SSTable::new(ts.path.join(level.to_string()).join(x.to_string()), true))
+            .collect::<io::Result<Vec<SSTable>>>()?;
         // will at worst be a k tables * num keys overestimate
         // unique keys recalculated each compaction, so this will not worsen
         let num_keys_estimation = tables
