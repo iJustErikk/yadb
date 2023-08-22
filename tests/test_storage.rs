@@ -244,7 +244,7 @@ fn generate_benchmark(mut tree: Tree, rounds: i32, gpd_weights: [i32; 3], key_ra
 // then we can compute the key range and we have a better knob
 // uniform distribution
 #[tokio::test]
-async fn split_bench() -> Result<(), Box<dyn Error>> {
+async fn slit_bench() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
     tree.init().await.expect("Failed to init folder");

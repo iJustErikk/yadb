@@ -1,4 +1,5 @@
 use fs::File;
+use growable_bloom_filter::GrowableBloom;
 use std::cell::RefCell;
 
 use std::fs;
@@ -10,8 +11,6 @@ use std::io::Seek;
 use std::io::SeekFrom;
 use std::iter::Peekable;
 use std::path::PathBuf;
-
-use bloomfilter::Bloom;
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::collections::BinaryHeap;
@@ -85,19 +84,18 @@ impl Table {
         Ok(self.get_index()?.entries.len())
     }
     // TODO: fix filter
-    // fn get_filter(&mut self) -> io::Result<Bloom<Vec<u8>>> {
-    //     self.file.seek(SeekFrom::End(-16))?;
-    //     let filter_offset = self.file.read_u64::<LittleEndian>()?;
-    //     self.file.seek(SeekFrom::Start(filter_offset))?;
-    //     let filter_size = self.file.read_u64::<LittleEndian>()?;
-    //     let mut filter_bytes: Vec<u8> = vec![0; filter_size as usize];
-    //     self.file.read_exact(&mut filter_bytes)?;
-    //     let raw = ExportedCuckooFilter{values: filter_bytes, length: filter_size as usize};
-    //     // TODO: we are unwrapping this, really we should have a corrupted filter error
-    //     let cf = CuckooFilter::try_from(raw).unwrap();
-    //     self.file.seek(SeekFrom::Start(0))?;
-    //     Ok(cf)
-    // }
+    pub fn get_filter(&mut self) -> io::Result<GrowableBloom> {
+        self.file.seek(SeekFrom::End(-16))?;
+        let filter_offset = self.file.read_u64::<LittleEndian>()?;
+        self.file.seek(SeekFrom::Start(filter_offset))?;
+        let filter_size = self.file.read_u64::<LittleEndian>()?;
+        println!("{filter_size}");
+        let mut filter_bytes: Vec<u8> = vec![0; filter_size as usize];
+        self.file.read_exact(&mut filter_bytes)?;
+        let filter = bincode::deserialize(&filter_bytes).unwrap();
+        self.file.seek(SeekFrom::Start(0))?;
+        Ok(filter)
+    }
     pub fn get_datablock(&mut self, offset: u64) -> io::Result<DataBlock> {
         self.file.seek(SeekFrom::Start(offset))?;
         let db = DataBlock::deserialize(&mut self.file)?;
@@ -109,6 +107,7 @@ impl Table {
     where
         I: IntoIterator<Item = (Vec<u8>, Vec<u8>)>,
     {
+        // TODO: have I been doing this entirely in memory? I thought I was doing this out of memory. need to fix this
         // TODO: I could convert these to use the serialize function for DataBlock + Index
         // this would present overhead, as they would most likely be copied into the ds just to be written out
         // but it would keep the logic for serde in one impl
@@ -125,14 +124,13 @@ impl Table {
         // siphash is used anyway in this crate...is it uniform?
         // interesting read: https://www.eecs.harvard.edu/~michaelm/postscripts/tr-02-05.pdf
         // TODO: look into hash DOS attacks
-        // switched from cuckoofilters back to bloom filters since I don't know how to handle eviction
+        // using growable-bloom-filter since it has serde support
         let r: f64 = 0.03;
-        // use regular bloom filters
-        let mut filter = Bloom::new_for_fp_rate(num_unique_keys, r);
+        let mut filter = GrowableBloom::new(r, num_unique_keys);
         let mut unique_keys: u64 = 0;
         for (key, value) in it {
             // println!("{unique_keys} {num_unique_keys}");
-            filter.set(&key);
+            filter.insert(&key);
             if current_block.is_empty() {
                 index.write_u64::<LittleEndian>(key.len() as u64)?;
                 index.extend(&key);
@@ -160,11 +158,10 @@ impl Table {
         self.file.write_all(&data_section)?;
         self.file.write_u64::<LittleEndian>(index.len() as u64)?;
         self.file.write_all(&index)?;
-        let ex_filter = filter.bit_vec();
-        // export_filter(filter);
+        let ex_filter = bincode::serialize(&filter).unwrap();
         self.file
             .write_u64::<LittleEndian>(ex_filter.len() as u64)?;
-        self.file.write_all(&ex_filter.to_bytes())?;
+        self.file.write_all(&ex_filter)?;
         // footer: 8 bytes for index offset, 8 for filter offset, 8 for unique keys
         // TODO: magic value
         let filter_offset = index.len() + data_section.len() + 8;

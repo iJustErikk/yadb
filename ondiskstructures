@@ -5,9 +5,9 @@ num bytes for sparse index
 [(key_len as u64, key)] <- sparse index
 byte encoding for bloom filter
 sstable footer:
-4 bytes byte offset for sparse index
-4 bytes byte offset for bloom filter
-4 bytes number of (unique) keys in file
+8 bytes byte offset for sparse index
+8 bytes byte offset for bloom filter
+8 bytes number of (unique) keys in file
 
 The index is placed after the datablocks to simplify compaction implementation.
 This seems similar to the rocksdb implementation. 

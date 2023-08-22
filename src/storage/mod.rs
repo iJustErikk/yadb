@@ -283,7 +283,7 @@ impl Tree {
         key: &Vec<u8>,
         ts: &TreeState
     ) -> Result<Option<Vec<u8>>, YAStorageError> {
-        let table: Table = Table::new(
+        let mut table: Table = Table::new(
             ts.path
                 .clone()
                 .join(level.to_string())
@@ -291,10 +291,10 @@ impl Tree {
             true,
         )?;
         // TODO: readd filters, cache them, MAKE SURE TO INVALIDATE
-        // let filter = table.get_filter()?;
-        // if !filter.contains(key) {
-        //     return Ok(None);
-        // }
+        let filter = table.get_filter()?;
+        if !filter.contains(key) {
+            return Ok(None);
+        }
         let (byte_offset, table) = ts.cache.index_cache.get(table, level.to_string() + "/" + &table_num.to_string(), (), key.clone()).await?;
         if byte_offset.is_none() {
             return Ok(None);
