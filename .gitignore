@@ -3,3 +3,4 @@ yadb/
 log
 profile.svg
 perf.*
+flamegraph.svg

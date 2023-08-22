@@ -1,18 +1,16 @@
 # YAdb
 yet another database ![Test Status](https://github.com/iJustErikk/yadb/actions/workflows/cargo-test.yml/badge.svg)
 
-making a db. with ~~rocksdb~~ ~~rust~~ ~~go/cockroachdb's pebble.~~ actually going back to rust, writing my own storage engine.
+Welcome to YAdb! This is my first (nontrival) Rust project. I am trying to implement a database from reasonably scratch. I've implemented a decent performance LSM based storage engine. Once that supports the features I need for a SQL database/distributed kv store, I'll switch to those. 
 
-Update: the storage engine now provides a minimum functionality for implementing a database (minus iterators for sql-like dbs). Improved performance via batching WAL IO. Currently working on improving the API (don't hide copies, make them do it), adding caching to improve read performance and adding iterators (need to consider transactions first).
+Update: Improving performance, API and adding iterators to storage engine to support SQL db workload.
 
-Motivation: I wish to better my system and data engineering skills. Data intensity will only increase. 
-
-Lofty goals for this project: 
-- Build lsm based kv store
-- Build distributed kv engine
-- Build single node sql database
+Goals for this project: 
+- Build lsm based kv store (almost there, see roadmap for more features)
+- Build distributed kv engine (need to decide whether to implement causal (probably more fun) or strong consistency)
+- Build single node sql database (simple sql to start)
 - Build distributed sql database (with simple sql, maybe fuller sql syntax for non-distributed databases) like Cockroachdb
-- (possibly) build b epsilon storage engine
+- (possibly) build b epsilon/fractal tree storage engine (have the bones, would need to implement only the data structure)
 
 ## Running/testing/profiling LSM Based KV Storage Engine
 

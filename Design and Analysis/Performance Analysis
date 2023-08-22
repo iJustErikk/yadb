@@ -1,0 +1,7 @@
+Areas to improve/measure on:
+
+Measure compaction performance
+Measure DB scan performance
+Reads are slow -> need to measure filter FP rate, do a bit of fine-grained optimization
+Measure tokio/sync overhead
+Measure write perf

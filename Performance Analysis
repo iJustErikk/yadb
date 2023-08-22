@@ -1,3 +1,0 @@
-2 areas to improve on:
-Heavy reads are not being cached (need caching)
-Lots of small writes are slow (see concurrent_writes_causing_compaction)

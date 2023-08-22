@@ -121,10 +121,9 @@ impl Table {
         let mut data_section: Vec<u8> = Vec::new();
         let mut current_block: Vec<u8> = Vec::new();
         // needs to be roughly uniform, deterministic and fast -> not the default hasher
-        // siphash is used anyway in this crate...is it uniform?
         // interesting read: https://www.eecs.harvard.edu/~michaelm/postscripts/tr-02-05.pdf
         // TODO: look into hash DOS attacks
-        // using growable-bloom-filter since it has serde support
+        // using growable-bloom-filter since it has serde support and decent documentation
         let r: f64 = 0.03;
         let mut filter = GrowableBloom::new(r, num_unique_keys);
         let mut unique_keys: u64 = 0;
