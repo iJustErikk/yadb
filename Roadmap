@@ -3,12 +3,14 @@ RIGHT NOW:
 - implement filter/index/block cache (need to undo mem::replace for datablocks)
 - extract magic variables to config (maybe cargo.toml or just pass in settings map)
 - pull lsmtree into its own class to eliminate remaining coupling and "prop drilling"
-- implement either mvcc or serializable snapshot isolation for transactions
 - implement iterator (when do iterators become invalid? should I go about a similar scheme to rocksdb (where iterators block operations that invalidate them)? how would I implement that?)
 
 TODO:
 
 TODO LATER (NEEDS PRIORITIZATION):
+- implement either mvcc or serializable snapshot isolation for transactions
+
+- to implement various consistency guarantees for a distributed version, if some write X2 is "accepted" (not failed) after some other write X1, X2's value must be read. care needs to be taken with the skiplist data structure wrt. lock-free and wait-free syncronization. it needs to respect that ordering. likewise for the WAL log (this needs to be append only anyway, so I'm not sure if I could ever avoid some form of totally-mutual syncronization here (this is the channel right now)). can this happen? I think it can, even if X1 resolves first, X2 can return to the user sooner. How to implement KV store as multithreaded and still allow for distributed consistency guarantees- without external synchronization affecting performance too much?
 - add ycsb benchmarks (there is a repo for this, but it needs to be extended to make it work with this (this repo's support for adding new engines is in progress/stale, need to reach out to them)) 
 - verify (prove) db durability + implement FS level manifest WAL to handle multiple/non atomic FS operations (varies OS to OS, everything should be atomic if POSIX compliant)
 - eliminate needless copies (is this done)
@@ -21,8 +23,8 @@ TODO LATER (NEEDS PRIORITIZATION):
 - support tables (tuples for values)
 - compression/checksums (GZIP or similar) (need to think of how this affects flushing a block)
 - allow user to customize compression/checksums
-- more stuff for dbs (merkle tree differences for anti-entropy mechanisms, configuring WAL log so it can hook up to replication logs like Raft(right now serde is abstracted, so all that needs to be done is wrap so user can choose where writes go))
-- more verification (both just in time and defensive checks) (JIT: read what you write, def: check blocks/checksums on startup and every some AEON (what is reasonable? 8 hours? this should be limited in throughput like compaction)
+- more stuff for dbs ((p)merkle tree differences for anti-entropy mechanisms, configuring WAL log so it can hook up to replication logs like Raft(right now serde is abstracted, so all that needs to be done is wrap so user can choose where writes go))
+- more verification (both just in time and defensive checks) (JIT: read what you write, def: check blocks/checksums on startup and every some epoch (what is reasonable? 8 hours? every X MB? should this be affected by time/disk consumption? this should be limited in throughput like compaction)
 - monitoring + metrics  (rocksdb calls these stats) (see below)
 - multiget/multiput (see rocksdb)
 - error correction (RAID support, ECC, https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1233620/ -> DNA does not have SIMPLE error correcting codes)
@@ -45,6 +47,7 @@ metrics to implement:
 - cache hit rate
 - table iterations (iterators)
 - lock contention times (for r/w, for memtable/fs)
+- lock-free/wait-free mechanism contention times (if implemented)
 - io time
 - compression time
 - wal log flushes, ratio of wal log flushes that are duration or accumulated

@@ -462,6 +462,7 @@ impl Tree {
         mw.memtable.insert_or_delete(key, value, operation == Operation::PUT);
 
         if mw.memtable.needs_flush() {
+            // we do not need to write to WAL! the entry is in the memtable!
             let skipmap = mw.memtable.get_skipmap();
             Self::write_skipmap_as_sstable(skipmap, &mut ts).await?;
             mw.memtable.reset();

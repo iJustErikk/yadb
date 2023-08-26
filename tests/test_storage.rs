@@ -259,6 +259,26 @@ async fn slit_bench() -> Result<(), Box<dyn Error>> {
     }
     Ok(())
 }
+// run this with wal block size of 32k -> 20MB/second throughput
+// should benchmark to see how this can be improved
+// how does this compare to the ssd this runs on? is codespace multitenant?
+// #[tokio::test]
+// async fn write_throughput() -> Result<(), Box<dyn Error>> {
+//     let dir = tempdir()?;
+//     let mut tree = Tree::new(dir.path().as_os_str().to_str().unwrap());
+//     tree.init().await.expect("Failed to init folder");
+//     let mut futures = generate_benchmark(tree, 100000, [100, 0, 0], [0, 10000], 1000);
+       
+
+//     while let Some(result) = futures.next().await {
+//         match result {
+//             DBResult::Get(res) => { res??; },
+//             DBResult::Empty(res) => { res??; },
+//         }
+//     }
+//     Ok(())
+// }
+
 
 // 50MB in 5 seconds -> 10MB/second
 // 10k ops/sec -> 18% table new, could maybe cut down on read ios/read io bandwith via bloom filter (esp with higher read amplificaion)
