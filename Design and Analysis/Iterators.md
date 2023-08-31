@@ -16,4 +16,10 @@ Stick with current implementation where only reads and scans can be concurrent. 
 
 ## Future Design
 
-We'll need to keep compacted tables alive until the iterators are finished (for validity). We'll also need to consider the memtable. If a key is updated while the iterator is still iterating, how would that work? For performance reasons, we should get more than 1 block at a time when scanning (prefetching). This could also speed up compactions. Point-in-time consistency and validity with scan-write concurrency will add quite a bit of complexity.
+In the future, we will want point-in-time consistency, validity and read-scan-write concurrency.
+
+To ensure validity, we'll keep old tables along so scans can finish. Once a table hits 0 references and needs to be cleaned up, it will be deleted. This allows us to start the compaction process whilst still scanning. One issue is what scheme we will use to r/w temporary or recently compacted tables (we need to be able to support the running iterators, be durable to restarts). How will this mesh with the FS Manifest WAL?
+
+How do figure memtable into point-in-time consistency? It will change with scan-write concurrency. The SSTables are easy, as they are immutable. One option is cloning. For many concurrency scans on a nearly full memtable, this will starve RAM. We could drastically reduce the chance of using too much RAM by only storing "snapshots" of the memtable. This is a lot of complexity to support faster read recognition. Memtables could also be flushed regularly, but this may create a lot of small memtables (and thus a lot of compaction). I think RocksDB makes this guarantee, as this is the easiest/fastest guarantee to support. There has to be a better solution.
+
+Better performance: prefetching/fetching many blocks at a time.

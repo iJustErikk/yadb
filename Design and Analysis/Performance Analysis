@@ -2,6 +2,6 @@ Areas to improve/measure on:
 
 Measure compaction performance
 Measure DB scan performance
-Reads are slow -> need to measure filter FP rate, do a bit of fine-grained optimization
+Reads are slow -> need to measure filter FP rate, do a bit of fine-grained optimization (for example, allocation is taking some time. Is there a better way we could allocate memory?)
 Measure tokio/sync overhead
 Measure write perf
