@@ -26,3 +26,7 @@ Concurrency could speed up a few parts of this application. There are a lot of m
 - Individual latency will increase from lock contention and execution reordering
 - Write throughput should increase
 - Overall time spent on WAL io should decrease (hopefully by 90% or more)
+
+### Results
+
+ops/sec, MB/sec massively increased. lots of time is spent on 
