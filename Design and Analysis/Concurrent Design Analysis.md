@@ -5,7 +5,7 @@ Concurrency could speed up a few parts of this application. There are a lot of m
 ## What could benefit from concurrency:
 
 - In memory reads can be completely concurrently resolved
-- In memory writes will need to execute serially (due to memtable size), but can be concurrently flushed to WAL via batching
+- In memory writes will need to execute in a locked fashion (due to memtable size), but can be concurrently flushed to WAL via batching
 - Compaction can be completed while requests are being served on uncompacted tables
 - On disk reads can be concurrently resolved (target hardware is SSDs), caching will benefit greatly. 
 - Concurrently compacting and resolving requests will reduce startup time and increase availability.

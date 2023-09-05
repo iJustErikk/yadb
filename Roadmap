@@ -52,3 +52,4 @@ metrics to implement:
 - compression time
 - wal log flushes, ratio of wal log flushes that are duration or accumulated
 - time between wal flushes
+- number of current immutable memtables
