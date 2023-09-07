@@ -26,6 +26,7 @@ futures = "0.3.28"
 serde = "1.0.185"
 bincode = "1.3.3"
 growable-bloom-filter = "2.0.1"
+uuid = {version = "1.4.1", features = ["v4"]}
 
 # only used in unit/integratiojn tests
 [dev-dependencies]

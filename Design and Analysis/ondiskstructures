@@ -14,3 +14,13 @@ This seems similar to the rocksdb implementation.
 
 wal:
 1 byte operation 4 byte key length [key] 4 byte value length [value] for each walentry
+
+header:
+each line is a list of hashes. the line corresponds to the level whereas the index within the line is the table within that level
+lines are obviously delimited by newlines, but names are delimited by dashes. names will be 128 bit hashes
+for example:
+
+a#b#c
+d#e
+
+-> level 0 table 1 is a, level 0 table 2 is b ... level 1 table 0 is d...

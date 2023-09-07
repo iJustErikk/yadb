@@ -89,7 +89,6 @@ impl SSTable {
         let filter_offset = self.file.read_u64::<LittleEndian>()?;
         self.file.seek(SeekFrom::Start(filter_offset))?;
         let filter_size = self.file.read_u64::<LittleEndian>()?;
-        println!("{filter_size}");
         let mut filter_bytes: Vec<u8> = vec![0; filter_size as usize];
         self.file.read_exact(&mut filter_bytes)?;
         let filter = bincode::deserialize(&filter_bytes).unwrap();

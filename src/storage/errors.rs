@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::error::Error;
 use std::{fmt, io};
 
@@ -13,7 +14,7 @@ pub enum YAStorageError {
     UnexpectedUserFolder { folderpath: String },
     UnexpectedUserFile { filepath: String },
     LevelTooLarge { level: u8 },
-    SSTableMismatch { expected: Vec<u8>, actual: Vec<u8> },
+    FSInitMismatch { expected: HashSet<String>, actual: HashSet<String> },
     CorruptWalEntry,
     MissingWAL,
 }
@@ -42,7 +43,7 @@ impl fmt::Display for YAStorageError {
                 write!(f, "Unexpected user file: {}", filepath)
             }
             YAStorageError::LevelTooLarge { level } => write!(f, "Level too large: {}", level),
-            YAStorageError::SSTableMismatch { expected, actual } => write!(
+            YAStorageError::FSInitMismatch { expected, actual } => write!(
                 f,
                 "SSTable mismatch: expected {:?}, got {:?}",
                 expected, actual
