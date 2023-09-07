@@ -1,4 +1,4 @@
-use crossbeam_skiplist::SkipMap;
+use skiplist::SkipMap;
 
 use tokio::io::{self, AsyncReadExt};
 use tokio::fs::File;
@@ -126,7 +126,7 @@ impl WALFile {
             }
         }
 
-        let skipmap = SkipMap::new();
+        let mut skipmap = SkipMap::new();
 
         for entry in entries {
             match entry.operation {

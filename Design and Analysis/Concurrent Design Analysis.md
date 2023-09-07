@@ -29,4 +29,4 @@ Concurrency could speed up a few parts of this application. There are a lot of m
 
 ### Results
 
-ops/sec, MB/sec massively increased. lots of time is spent on 
+ops/sec, MB/sec massively increased

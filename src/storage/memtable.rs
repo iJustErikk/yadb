@@ -1,4 +1,4 @@
-use crossbeam_skiplist::SkipMap;
+use skiplist::SkipMap;
 // TODO: we 'reach' into here often. we should expose functions
 
 pub const MAX_MEMTABLE_SIZE: usize = 1_000_000;
@@ -23,7 +23,7 @@ impl Memtable {
     }
     pub fn insert_or_delete(&mut self, key: &Vec<u8>, val: &Vec<u8>, is_put: bool) {
         let old_size = if self.skipmap.contains_key(key) {
-            key.len() + self.skipmap.get(key).unwrap().value().len()
+            key.len() + self.skipmap.get(key).unwrap().len()
         } else {
             0
         };

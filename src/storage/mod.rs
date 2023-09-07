@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use uuid::{Uuid, Error as UuidError};
 
-use crossbeam_skiplist::SkipMap;
+use skiplist::SkipMap;
 
 mod memtable;
 use memtable::Memtable;
@@ -298,7 +298,7 @@ impl Tree {
             let ts = ts_clone.read().await;
             let mw = mw_clone.read().await;
             if let Some(value) = mw.memtable.skipmap.get(&key) {
-                let res = value.value().to_vec();
+                let res = value.to_vec();
                 if res.len() == 0 {
                     return Ok(None);
                 }

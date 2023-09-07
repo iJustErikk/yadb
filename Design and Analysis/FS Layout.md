@@ -16,8 +16,7 @@ The header file format will change. It will need to store a mapping of file hash
 
 When updating: Simply just replace the header. Any tables not serving any purpose on startup are deleted (failed memtable/wal flushes, failed compaction). WAL restore/compaction are retried. 
 
-To guarantee this, only after table has been fsynced for WAL/memtable flush, flush the header.
+To guarantee this, only reset WAL/delete old level after header has been successfully committed.
 
-For compactions, flush before deleting the level (WHY?)
 
 Note: there will not be issues with flushing header. UNIX writes are atomic (for single block writes). So, the header will either only be the new one or the old one. If the write failed, then we will have to redo the operation, but that is much better than losing the database.

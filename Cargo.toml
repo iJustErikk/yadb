@@ -18,7 +18,6 @@ debug = true
 tokio = { version = "1.29.1", features = ["io-util", "fs", "macros", "rt-multi-thread", "sync", "time"] }
 log = "0.4.17"
 simplelog = "0.12.1"
-crossbeam-skiplist = "0.1.1"
 byteorder = "1.4.3"
 fastmurmur3 = "0.1.2"
 schnellru = "0.2.1"
@@ -27,6 +26,7 @@ serde = "1.0.185"
 bincode = "1.3.3"
 growable-bloom-filter = "2.0.1"
 uuid = {version = "1.4.1", features = ["v4"]}
+skiplist = "0.5.1"
 
 # only used in unit/integratiojn tests
 [dev-dependencies]

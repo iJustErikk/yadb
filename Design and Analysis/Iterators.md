@@ -32,8 +32,8 @@ Better performance: prefetching/fetching many blocks at a time.
 We'd like point-in-time consistency, w/scan concurrency and validity. Here are changes that would allow us to get to this point:
 
 - Replace current SSTable/Level layout with "virtual" representation- files are in the same directory, they have hashes as names and are mapped to their level/name representation in the header. This will enable validity and concurrency requirement. On startup, there will be a check to ensure all tables referenced in header exist. (this includes a redesign of the TreeState struct) -> COMPLETE.
-- Replace lock-free skiplist with regular skiplist. This allows us to ensure consistency easier and we aren't useful the lock-free property just yet.
-- Implement FS-level durability discussed in `FS Layout.
+- Replace lock-free skiplist with regular skiplist. This allows us to ensure consistency easier and we aren't useful the lock-free property just yet. -> COMPLETE.
+- Implement FS-level durability discussed in `FS Layout. -> COMPLETE
 - Change memtable scheme to include 0 or more immutable memtables + reference counting for ensuring point-in-time consistency, validity and concurrency. On usage, assert existence of tables being used. Immuatable memtables should be stored outside of the mutex for the mutable memtable/wal as we wish to serve writes to the mutable memtable whilst serving reads to the immutable memtables.
 - Async/tokify rest of tables. iterators -> streams
 - Finalize iterator implementation. Can serve SQL workloads (with external transaction support)! Slap a little serde onto iterators and writes, then a baby sql db is born! This of course provides simple SQL support, but is an important deliverable.
