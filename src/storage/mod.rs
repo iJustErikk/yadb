@@ -2,6 +2,7 @@ use std::collections::HashSet;
 // lsm based storage engine
 // level compaction whenever level hits 10 sstables
 use tokio::fs::{self, File};
+use futures::stream::{self};
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
@@ -28,7 +29,7 @@ pub use errors::YAStorageError;
 
 // sstable- should I rename table?
 mod sstable;
-use sstable::{search_index, MergedTableIterators, SSTable, Index, DataBlock};
+use sstable::{search_index, MergedTableStreams, SSTable, Index, DataBlock};
 pub use memtable::MAX_MEMTABLE_SIZE;
 
 mod async_cache;
@@ -111,7 +112,7 @@ impl LSMCache {
     }
 
     fn get_block(mut table: SSTable, offset: u64) -> BoxFuture<'static, Result<(DataBlock, SSTable), YAStorageError>> {
-        return Box::pin(async move {Ok((table.get_datablock(offset)?, table))});
+        return Box::pin(async move {Ok((table.get_datablock(offset).await?, table))});
     }
 
     fn index_callback(index: &Index, key: Vec<u8>) -> Option<u64> {
@@ -323,6 +324,7 @@ impl Tree {
         
     }
 
+
     async fn write_skipmap_as_sstable(skipmap: SkipMap<Vec<u8>, Vec<u8>>, ts: &mut TreeState) -> Result<(), YAStorageError> {
         if !ts.path.join("0").exists() {
             fs::create_dir(ts.path.join("0")).await?;
@@ -337,10 +339,12 @@ impl Tree {
 
         let mut table = SSTable::new(new_path, false)?;
         let skipmap_len = skipmap.len();
+        // this is not send!
+        let st = stream::iter(skipmap.into_iter());
         table.write_table(
-            skipmap.into_iter(),
+            st,
             skipmap_len,
-        )?;
+        ).await?;
         if ts.header.mapping.len() == 0 {
             ts.header.mapping.push(Vec::new());
         }
@@ -393,9 +397,9 @@ impl Tree {
             .unwrap();
 
         table.write_table(
-            MergedTableIterators::new(tables)?,
+            Box::pin(MergedTableStreams::new(tables).await?),
             num_keys_estimation as usize,
-        )?;
+        ).await?;
 
         ts.header.mapping[level as usize] = Vec::new();
         if ts.header.mapping.len() <= (level + 1) as usize {

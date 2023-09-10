@@ -12,8 +12,8 @@ use std::future::Future;
 use tokio::task::JoinError;
 use std::error::Error;
 use yadb::storage::*;
-use futures::stream::FuturesUnordered;
-use futures::stream::StreamExt;
+use tokio::stream::FuturesUnordered;
+use tokio::stream::StreamExt;
 
 
 fn str_to_byte_buf(s: &String) -> Vec<u8> {

@@ -32,6 +32,13 @@ TODO LATER (NEEDS PRIORITIZATION):
 verify this on startup so user cannot corrupt db from providing mismatching settings (usually this would be some migration) note: this too can get corrupted. maybe this should be stored in its own table? maybe that is why sql dbms typically store their data in their own tabels
 - migrations (avoid as long as possible- we do not have active users)
 
+- Avoid writing tombstone when compacting
+  we can surely do this when compacting the current top level
+ however, how can we do this if its not the current top level?
+ could use bloom filter...however the ~97% chance tp tn exponentially decreases
+ even by 20 tables, this is still better than guessing (~54%)
+ so if we cache the bloom filters on startup, this is an option.
+- Try reducing most blocks below 1 block size (so its only 1 r/w IO rather than 2)
 metrics to implement:
 - wal replays
 - wal replay total bytes

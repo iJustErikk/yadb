@@ -1,6 +1,10 @@
 use fs::File;
+use futures::Future;
+use futures::Stream;
+use futures::StreamExt;
+use futures::stream::Peekable;
 use growable_bloom_filter::GrowableBloom;
-use std::cell::RefCell;
+use futures::task::Context;
 
 use std::fs;
 use std::hash::BuildHasher;
@@ -9,26 +13,27 @@ use std::io;
 use std::io::Cursor;
 use std::io::Seek;
 use std::io::SeekFrom;
-use std::iter::Peekable;
 use std::path::PathBuf;
+use std::pin::Pin;
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::collections::BinaryHeap;
 use std::io::Read;
 use std::io::Write;
 
+use futures::task::Poll;
 
-
-// facade for table accesses. combines serde with knowledge of ondisk structure to provide clean api.
+// class for using tables. combines serde with knowledge of ondisk structure to provide clean api.
 // also provides API for a couple of different types of iterators to write table.
 // TODO: implementation has tons of magic values. is there a better way to do this?
 // I think the best thing to do is isolate seek logic + offset io to internal functions
-// TODO: this needs to be asyncified, but there are lots of issues with that (async iterators, ord in heaps with async)
 pub struct SSTable {
     file: File,
+    // TODO: pull SSTable iterator state into separate class
     total_data_bytes: Option<u64>,
     current_block: Option<DataBlock>,
     current_block_idx: usize,
+    get_block_future: Option<Pin<Box<dyn Future<Output=io::Result<DataBlock>> + Sync + Send>>>
 }
 
 pub const BLOCK_SIZE: usize = 4_000;
@@ -53,6 +58,7 @@ impl SSTable {
                 total_data_bytes,
                 current_block: None,
                 current_block_idx: 0,
+                get_block_future: None
             });
         }
         return Ok(SSTable {
@@ -60,6 +66,7 @@ impl SSTable {
             total_data_bytes,
             current_block: None,
             current_block_idx: 0,
+            get_block_future: None
         });
     }
     // TODO: rework this to become private
@@ -95,50 +102,33 @@ impl SSTable {
         self.file.seek(SeekFrom::Start(0))?;
         Ok(filter)
     }
-    pub fn get_datablock(&mut self, offset: u64) -> io::Result<DataBlock> {
+    pub async fn get_datablock(&mut self, offset: u64) -> io::Result<DataBlock> {
         self.file.seek(SeekFrom::Start(offset))?;
-        let db = DataBlock::deserialize(&mut self.file)?;
+        let db = DataBlock::deserialize(&mut self.file).await?;
         self.file.seek(SeekFrom::Start(0))?;
         return Ok(db);
     }
 
-    pub fn write_table<I>(&mut self, it: I, num_unique_keys: usize) -> io::Result<()>
+    pub async fn write_table<I>(&mut self, mut it: I, num_unique_keys: usize) -> io::Result<()>
     where
-        I: IntoIterator<Item = (Vec<u8>, Vec<u8>)>,
+        I: Stream<Item = (Vec<u8>, Vec<u8>)> + Unpin + Send,
     {
-        // TODO: have I been doing this entirely in memory? I thought I was doing this out of memory. need to fix this
-        // TODO: I could convert these to use the serialize function for DataBlock + Index
-        // this would present overhead, as they would most likely be copied into the ds just to be written out
-        // but it would keep the logic for serde in one impl
-        // TODO: we can avoid writing the tombstone if a the key is not in any older block
-        // we can surely do this when compacting the current top level
-        // however, how can we do this if its not the current top level?
-        // could use bloom filter...however the ~97% chance tp tn exponentially decreases
-        // even by 20 tables, this is still better than guessing (~54%)
-        // so if we cache the bloom filters on startup, this is an option.
         let mut index: Vec<u8> = Vec::new();
         let mut data_len = 0;
-        // TODO: most blocks will be slightly larger than 4kb- we can reserve to save some time
         let mut current_block: Vec<u8> = Vec::new();
         current_block.reserve(4096);
-        // needs to be roughly uniform, deterministic and fast -> not the default hasher
-        // interesting read: https://www.eecs.harvard.edu/~michaelm/postscripts/tr-02-05.pdf
-        // TODO: look into hash DOS attacks
+        
         // using growable-bloom-filter since it has serde support and decent documentation
         let r: f64 = 0.03;
         let mut filter = GrowableBloom::new(r, num_unique_keys);
         let mut unique_keys: u64 = 0;
-        for (key, value) in it {
-            // println!("{unique_keys} {num_unique_keys}");
+        while let Some((key, value)) = it.next().await {
             filter.insert(&key);
             if current_block.is_empty() {
                 index.write_u64::<LittleEndian>(key.len() as u64)?;
                 index.extend(&key);
                 index.write_u64::<LittleEndian>(data_len as u64)?;
             }
-            // TODO: this will pack things into blocks until they exceed 4kb
-            // that means most reads will be 2 blocks
-            // no bueno, fix this
             current_block.write_u64::<LittleEndian>(key.len() as u64)?;
             current_block.extend(key);
             current_block.write_u64::<LittleEndian>(value.len() as u64)?;
@@ -177,40 +167,51 @@ impl SSTable {
     }
 }
 
-impl Iterator for SSTable {
-    // this iterator can return errors
+impl Stream for SSTable {
+    // this stream can return errors
     type Item = io::Result<(Vec<u8>, Vec<u8>)>;
 
-    fn next(&mut self) -> Option<Self::Item> {
+    fn poll_next(mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // we better open this in read mode
         assert!(self.total_data_bytes.is_some());
         if self.current_block.is_none()
             || self.current_block_idx == self.current_block.as_ref().unwrap().entries.len()
         {
             // we better not be past the data bytes
-            assert!(self.total_data_bytes.unwrap() >= self.file.stream_position().unwrap());
-            if self.total_data_bytes.unwrap() == self.file.stream_position().unwrap() {
+            assert!(self.total_data_bytes.unwrap() >= self.as_mut().file.stream_position().unwrap());
+            if self.total_data_bytes.unwrap() == self.as_mut().file.stream_position().unwrap() {
                 // we've reached the end of the datablocks
-                return None;
+                return Poll::Ready(None);
             }
-            let current_block = DataBlock::deserialize(&mut self.file);
+            // we start and poll
+            if self.get_block_future.is_none() {
+                self.get_block_future = Some(Box::pin(DataBlock::deserialize(&mut self.as_mut().file)));
+            }
+            let res = self.get_block_future.unwrap().as_mut().poll(cx);
+            if res.is_pending() {
+                return Poll::Pending;
+            }
+            let Poll::Ready(res) = res;
+            let current_block = res;
             if current_block.is_err() {
-                return Some(Err(current_block.err().unwrap()));
+                return Poll::Ready(Some(Err(current_block.err().unwrap())));
             }
-            self.current_block = Some(current_block.unwrap());
-            self.current_block_idx = 0;
+            self.as_mut().current_block = Some(current_block.unwrap());
+            self.as_mut().current_block_idx = 0;
+            self.as_mut().get_block_future = None;
         }
         let kv = std::mem::replace(
-            &mut self.current_block.as_mut().unwrap().entries[self.current_block_idx],
+            &mut self.as_mut().current_block.as_mut().unwrap().entries[self.current_block_idx],
             (Vec::new(), Vec::new()),
         );
-        self.current_block_idx += 1;
-        return Some(Ok(kv));
+        self.as_mut().current_block_idx += 1;
+        return Poll::Ready(Some(Ok(kv)));
     }
 }
 
-// TODO: expose search_entries to keep this private
 pub struct DataBlock {
+    // TODO: expose search_entries to keep this private
     pub entries: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
@@ -221,7 +222,7 @@ impl Clone for DataBlock {
 }
 
 impl DataBlock {
-    fn deserialize(reader: &mut File) -> io::Result<Self> {
+    async fn deserialize(reader: &mut File) -> io::Result<Self> {
         let block_size = reader.read_u64::<LittleEndian>()?;
         let mut block = vec![0; block_size as usize];
         reader.read_exact(&mut block)?;
@@ -251,27 +252,11 @@ impl Clone for Index {
     }
 }
 
-// index grows linearly with sstable keys/data
-// index has a key for each ~4kb block
-// if we have 1tb of data
-// then we have ~256m keys in the index
-// that is at least 1gb memory
-// that needs to be optimized, otherwise we have a hard limit
-// also loading 1gb into memory is horrifically slow
-// could also present ram starvation if done in parallel
-// since index could not be read entirely into memory at that size
-// checksums would be hard
-// what is the max size?
-// I could turn compaction off for top level if it become full
-// what is the max size again? 1st level 10mb + 2nd 100mb + 3rd 1 gb + 4th 10gb + 5th 100gb ~< 200gb
-// so the largest table would be ~ 10gb
-// ~2.5 million keys in sparse index
-// way less than 1gb in memory
+// sparse index grows linearly, but generally remains small enough to load into memory
 impl Index {
     fn deserialize(mut reader: &File) -> io::Result<Index> {
         let mut entries = Vec::new();
         // TODO: is it the caller's responsibility to put the file pointer in the right place or is it this function's
-        // I really should be wrapping these functions with functions in Table- one place to verify on disk structure implementation
         // last 8 bytes are index offset
         let index_size = reader.read_u64::<LittleEndian>()?;
         let mut bytes_read = 0;
@@ -310,8 +295,8 @@ pub struct Index {
 // if key < index_keys[mid] -> cuts right half (keeps mid's block), very much still in there
 // if key >= index_keys[mid + 1] -> cuts left half -> left half is known to be less
 // these maintain our containing invariant so this is correct
-// TODO: shouldn't this be private? we should steal search_table from other Tree
 pub fn search_index(index: &Index, key: &Vec<u8>) -> Option<u64> {
+    // TODO: shouldn't this be private? we should steal search_table from other Tree
     assert!(index.entries.len() != 0);
     assert!(key.len() != 0);
     if key < &index.entries[0].0 {
@@ -336,13 +321,16 @@ pub fn search_index(index: &Index, key: &Vec<u8>) -> Option<u64> {
         }
     }
 }
-pub struct MergedTableIterators {
+pub struct MergedTableStreams {
     heap: BinaryHeap<TableNum>,
+    tables: Vec<Peekable<SSTable>>,
+    futures: Vec<Option<Pin<Box<dyn Future<Output = Option<<SSTable as Stream>::Item>>  + Send >>>>
 }
 
+
 struct TableNum {
-    // we are using refcell so we can peek
-    table: RefCell<Peekable<SSTable>>,
+    // clone key for now, need to learn more about references and lifetimes
+    key: (Vec<u8>, Vec<u8>),
     num: usize,
 }
 
@@ -362,33 +350,9 @@ impl PartialOrd for TableNum {
 
 impl Ord for TableNum {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        let mut first_table = self.table.borrow_mut();
-        let mut second_table = other.table.borrow_mut();
-        let first = first_table.peek();
-        let second = second_table.peek();
-        // we will not push a empty iterator back into the heap
-        assert!(first.is_some());
-        assert!(second.is_some());
-        // if there is an error, we unfortunately cannot return it
-        // TODO: cannot find an errable heap implementation, will need to spin one up
-        // could very messily order errors to be less than non errors and then handle an error when popping
-        let first = &(match first {
-            Some(Ok(first)) => Some(first),
-            // won't happen
-            _ => None,
-        }
-        .unwrap()
-        .0);
-        let second = &(match second {
-            Some(Ok(second)) => Some(second),
-            // won't happen
-            _ => None,
-        }
-        .unwrap()
-        .0);
-        let first = (first, self.num);
-        let second = (second, other.num);
-        // order first by peeked key ref, then by table number (higher is younger and higher)
+        let first = self.key.0;
+        let second = other.key.0;
+        // order first by key then by table number (higher is younger and higher)
         // we want this to be a min heap
         // order first by key (smaller key means greater)
         // then order by table number (smaller table number means greater)
@@ -411,47 +375,75 @@ impl Ord for TableNum {
     }
 }
 
-impl MergedTableIterators {
-    pub fn new(tables: Vec<SSTable>) -> io::Result<Self> {
+impl MergedTableStreams {
+    // `async fn` return type cannot contain a projection or `Self` that references lifetimes from a parent scope
+    pub async fn new(tables: Vec<SSTable>) -> io::Result<MergedTableStreams> {
         let mut heap: BinaryHeap<TableNum> = BinaryHeap::new();
-        for (num, table) in tables.into_iter().enumerate() {
-            let mut peekable_table = table.peekable();
-            let first_res = peekable_table.peek();
-            assert!(first_res.is_some());
-            if first_res.unwrap().is_err() {
-                let next = peekable_table.next().unwrap().err().unwrap();
-                return Err(next);
-            }
+    
+    let mut peeks: Vec<Peekable<SSTable>> = tables.into_iter().map(|table| table.peekable()).collect();
+
+    for (num, peekable_table) in peeks.iter_mut().enumerate() {
+        let mut pinned = Pin::new(peekable_table);
+        let first_res = pinned.as_mut().peek().await;
+        
+        assert!(first_res.is_some());
+        
+        if first_res.unwrap().is_err() {
+            let next = pinned.as_mut().next().await.unwrap().err().unwrap();
+            return Err(next);
+        }
+        
+        if let Some(Ok(res)) = first_res {
             heap.push(TableNum {
-                table: RefCell::new(peekable_table),
-                num,
+                key: res.clone(),
+                num
             });
         }
-        return Ok(MergedTableIterators { heap });
+    }
+    let plen = peeks.len();
+    // https://stackoverflow.com/questions/65011997/why-cant-none-be-cloned-for-a-generic-optiont-when-t-doesnt-implement-clone
+    Ok(MergedTableStreams { heap, tables: peeks, futures: std::iter::repeat_with(|| Option::<Pin<Box<dyn Future<Output=Option<<SSTable as Stream>::Item>> + Send>>>::None).take(plen).collect::<Vec<_>>() })
     }
 }
 
-impl Iterator for MergedTableIterators {
+impl Stream for MergedTableStreams {
     type Item = (Vec<u8>, Vec<u8>);
 
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.heap.is_empty() {
-            return None;
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // Vec<Option<Pin<Box<dyn Future<Output = <SSTable as Stream>::Item>>>>>
+        // if any of these are not none, poll and return pending
+        // how do we know when we are done?
+        // if an iterator becomes exhausted, we'll simply not put it back into the heap
+        // so check the count of futures + heap
+        // regular for loop???!?!?!?!?!
+        let some_future = false;
+        let mut unready = 0;
+        for i in 0..self.futures.len() {
+            let op_future = self.futures[i];
+            if op_future.is_some() {
+                let some_future = true;
+                if let Poll::Ready(res) = op_future.unwrap().as_mut().poll(cx) {
+                    self.heap.push(TableNum { key: res.unwrap().unwrap(), num: i });
+                    self.futures[i] = None;
+                } else {
+                    unready += 1;
+                }
+            } else {
+                // this stream is complete!
+                self.futures[i] = None;
+            }
+        }
+
+        if self.heap.is_empty() && !some_future {
+            return Poll::Ready(None);
+        }
+        if unready != 0 {
+            return Poll::Pending;
         }
         let popped_value = self.heap.pop().unwrap();
-        let (res, should_push) = {
-            let mut table = popped_value.table.borrow_mut();
-            let res = table.next();
-            // we will not put back an empty iterator and if an iterator produced an error, we would have panicked before
-            assert!((&res).is_some());
-            let res = res.unwrap();
-            assert!((&res).is_ok());
-            (res.unwrap(), table.peek().is_some())
-        };
-        if should_push {
-            self.heap.push(popped_value);
-        }
-        Some(res)
+        let res = popped_value.key;
+        self.futures[popped_value.num] = Some(Box::pin(self.tables[popped_value.num].next()));
+        Poll::Ready(Some(res))
     }
 }
 
